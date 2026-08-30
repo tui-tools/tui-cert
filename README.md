@@ -1,5 +1,7 @@
 <img src="assets/logo.png" alt="tui-cert" width="240">
 
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/tui-tools/tui-cert/badge)](https://scorecard.dev/viewer/?uri=github.com/tui-tools/tui-cert)
+
 A terminal UI for the TLS certificates on this machine. It finds them, puts them
 on one screen **worst first**, and tells you which one is going to stop working
 and when — and it **previews the exact command line of every change before

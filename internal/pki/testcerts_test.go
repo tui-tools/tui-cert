@@ -132,7 +132,7 @@ func issue(t *testing.T, spec certSpec) *testCert {
 // writeFile puts one file into a temporary tree, creating its directories.
 func writeFile(t *testing.T, path string, mode os.FileMode, body []byte) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
 	}
 	if err := os.WriteFile(path, body, mode); err != nil {
