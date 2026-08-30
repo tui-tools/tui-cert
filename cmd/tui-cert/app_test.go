@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,7 +59,7 @@ func press(a *app, key string) tea.Cmd {
 // gotoScreen moves to a tab by its number key.
 func gotoScreen(t *testing.T, a *app, s screen) {
 	t.Helper()
-	drain(t, a, press(a, string(rune('1'+int(s)))))
+	drain(t, a, press(a, strconv.Itoa(int(s)+1)))
 	if a.screen != s {
 		t.Fatalf("did not reach the %s screen", s.title())
 	}
