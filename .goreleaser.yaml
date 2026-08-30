@@ -164,7 +164,7 @@ release:
   header: |
     ## tui-cert {{ .Tag }}
 
-    {{ .TagBody }}
+    {{ .TagContents }}
 
     Built by this repository's CI on the tag itself. Each archive ships a
     CycloneDX SBOM, `checksums.txt` carries a keyless cosign signature, and
