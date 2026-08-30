@@ -362,6 +362,7 @@ that fails on its first command.
 tui-cert                       # read this machine
 tui-cert --demo                # sample machine, no privileges needed
 tui-cert --check               # read, print JSON, exit
+tui-cert --report              # print what a bug report needs, exit
 tui-cert --path /srv/tls       # scan somewhere else too; repeatable
 tui-cert --theme ~/mytheme/colors.toml
 tui-cert --sudo ""             # run the commands directly (as root)
@@ -402,6 +403,44 @@ tool against real machines on Ubuntu, Fedora and Arch; the assertions live in
 makes its own certificate with `openssl` in `$TMPDIR` and points the tool at it
 through the configuration, so it can assert on a subject and a day count it
 chose itself.
+
+### `--report`, for bug reports
+
+`--report` prints, in one block, everything a maintainer has to ask for
+otherwise: the tool and kit versions, the backend, which of the optional
+programs the version probe reported on and which of them are on the machine at
+all, the distribution, the kernel, the terminal, the theme, the escalation
+prefix, and whether the running binary came from a package. It needs no
+privileges and reads no certificate, so it works on the machine where the bug
+is — including one where the backend cannot be built at all, which is itself a
+thing worth reporting.
+
+```console
+$ tui-cert --report
+tui-cert 0.1.2 (kit v0.2.9)
+backend: pki (version unknown: read with crypto/x509, so there is no program version to read)
+mode: live
+distro: fedora 42 (Fedora Linux 42 (Workstation Edition))
+kernel: 6.19.14-108.fc42.x86_64
+arch: x86_64
+locale: en_US.UTF-8
+term: xterm-256color
+theme: tokyo-night
+sudo: sudo -n
+root: no
+binary: /usr/bin/tui-cert (packaged)
+version probe: openssl 3.2.6
+programs: certbot absent, acme-sh absent, openssl installed
+```
+
+The block is written to be published as it is: it carries no hostname, user
+name, home path or address, and no environment variable beyond `LANG`,
+`LC_ALL`, `TERM` and `TERM_PROGRAM`. A binary living under your home directory
+is reported as being there without naming the path. `--report` works with
+`--demo` too, where it says so on the `mode` line.
+
+The bug form asks for this block first — see
+[`.github/ISSUE_TEMPLATE/bug_report.yml`](.github/ISSUE_TEMPLATE/bug_report.yml).
 
 ## What it can do to your machine
 

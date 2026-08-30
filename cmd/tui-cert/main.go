@@ -79,6 +79,7 @@ func splitPaths(value string) []string {
 type options struct {
 	demo        bool
 	check       bool
+	report      bool
 	themePath   string
 	sudo        string
 	paths       pathList
@@ -99,6 +100,7 @@ func parseFlags(args []string, out *os.File) (options, error) {
 	fs.BoolVar(&opts.check, "check", false,
 		"read the machine and print the parsed state as JSON, then exit "+
 			"(no UI, no changes, no network); exit 1 if the backend cannot be read")
+	fs.BoolVar(&opts.report, "report", false, reportUsage)
 	fs.StringVar(&opts.themePath, "theme", "",
 		"path to an Omarchy-style colors.toml (overrides the config file)")
 	fs.StringVar(&opts.sudo, "sudo", "",
@@ -156,6 +158,25 @@ func run(args []string) error {
 	}
 	applyOverrides(&cfg, opts)
 
+	// The configured theme is handed to the kit through the same variable the
+	// user could set by hand, so precedence stays in one place. It is set
+	// before the backend is built so --report can name the theme the UI would
+	// have used even on a machine where no backend can be.
+	if path := cfg.Theme(); path != "" {
+		if err := os.Setenv("TUI_THEME", path); err != nil {
+			return err
+		}
+	}
+
+	// --report is the non-interactive path that must work everywhere. It
+	// reads no certificate and it survives a machine where the backend cannot
+	// be built at all, because "nothing here could be read" is one of the
+	// things a bug report has to be able to say. So it comes before the
+	// backend is required.
+	if opts.report {
+		return runReport(cfg, opts, os.Stdout)
+	}
+
 	// Two probes, because they answer two questions. The first is what the
 	// header reports on; the second is what the create form's one
 	// version-gated capability depends on, which is openssl's and nothing
@@ -173,14 +194,6 @@ func run(args []string) error {
 	// and never starts a terminal program.
 	if opts.check {
 		return runCheck(backend, backendCompat, os.Stdout)
-	}
-
-	// The configured theme is handed to the kit through the same variable the
-	// user could set by hand, so precedence stays in one place.
-	if path := cfg.Theme(); path != "" {
-		if err := os.Setenv("TUI_THEME", path); err != nil {
-			return err
-		}
 	}
 
 	program := tea.NewProgram(newApp(backend, theme.New(), backendCompat),
