@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "name": "tui-template",
-  "binary": "tui-template",
-  "tagline": "A working skeleton for a new tui-tools tool",
-  "description": "The starting point for a new tool in the family. Press **Use this template**, rename it, replace one package, and you have a tool that looks and behaves like the rest.\n\nIt is not a pile of TODOs: it is a working tool. It lists the files in a directory and can update a file's timestamp, which is deliberately trivial — what matters is the shape around it, and that shape is already correct: the action table that generates the key map, the help screen and the confirm dialog; the backend interface with a real and a fake implementation; `--demo`; CI; and GoReleaser.\n\nThis `tool.json` is itself the example. It is a valid manifest, validated against [the schema](https://github.com/tui-tools/tui-kit/blob/main/schema/tool.schema.json) on every CI run, and the values are the ones you replace.",
-  "category": "template",
-  "homepage": "https://github.com/tui-tools/tui-template",
-  "repo": "https://github.com/tui-tools/tui-template",
+  "name": "tui-cert",
+  "binary": "tui-cert",
+  "tagline": "Every certificate on the machine, and what will stop working when",
+  "description": "A terminal UI for the TLS certificates on this machine. It finds them — the Let's Encrypt tree, /etc/ssl, /etc/pki, the paths an nginx, Apache or Caddy configuration names — and puts them on one screen, worst first: expired, expiring, the ones whose private key is not their key, the ones whose key every account can read.\n\nReading is done in Go. crypto/x509 parses the chain, verifies it against the system trust store and compares the key, so the whole inventory works on a machine with no openssl, no certbot and nothing else installed. Those are optional and only ever used to act.\n\nThree more screens complete it: what certbot or acme.sh manages and whether its renewal timer is really running; a live TLS handshake, on demand, which is how a certificate renewed on disk and never reloaded shows itself; and where the tool looked, including what it could not open.\n\nEvery change is previewed as the exact command line: a rehearsed renewal, a forced one with what it costs in rate limit, or a generated key pair.\n\nRun `tui-cert --demo` for a sample machine with seven certificates in seven states, and nothing touched.",
+  "category": "certificates",
+  "homepage": "https://github.com/tui-tools/tui-cert",
+  "repo": "https://github.com/tui-tools/tui-cert",
   "license": "MIT",
   "platforms": [
     "linux/amd64",
@@ -16,30 +16,70 @@
   "logo": "assets/logo.png",
   "screenshots": [
     {
-      "path": "docs/screenshots/tui-template-main.png",
-      "caption": "The list: the four bands every tool in the family draws"
+      "path": "docs/screenshots/tui-cert-main.png",
+      "caption": "The inventory, worst first: what expires when, who issued it, and which server serves it"
     },
     {
-      "path": "docs/screenshots/tui-template-touch.png",
-      "caption": "The confirm dialog, showing the exact command line before it runs"
+      "path": "docs/screenshots/tui-cert-detail.png",
+      "caption": "One certificate in full: the chain, the key beside it, the configuration that references it"
     },
     {
-      "path": "docs/screenshots/tui-template-help.png",
-      "caption": "The help screen, generated from the action table"
+      "path": "docs/screenshots/tui-cert-renewal.png",
+      "caption": "What certbot manages, and whether its renewal timer is actually running"
+    },
+    {
+      "path": "docs/screenshots/tui-cert-live.png",
+      "caption": "A live handshake: what the server is really serving, next to what is in the file"
+    },
+    {
+      "path": "docs/screenshots/tui-cert-create.png",
+      "caption": "Generating a self-signed certificate or a signing request, one field at a time"
+    },
+    {
+      "path": "docs/screenshots/tui-cert-help.png",
+      "caption": "The help screen, generated from the same key table as the hint bar"
     }
   ],
   "keys": [
     {
-      "key": "t",
-      "action": "Touch the selected file"
+      "key": "tab / 1-4",
+      "action": "Move between certificates, renewal, live checks and sources"
+    },
+    {
+      "key": "enter",
+      "action": "Open the selected row in full"
+    },
+    {
+      "key": "c",
+      "action": "Connect to the selected certificate's own name and read what is served"
+    },
+    {
+      "key": "C",
+      "action": "The same, against a host you type"
+    },
+    {
+      "key": "n",
+      "action": "Generate a self-signed certificate, previewed before it is written"
+    },
+    {
+      "key": "s",
+      "action": "Generate a certificate signing request the same way"
+    },
+    {
+      "key": "d",
+      "action": "Rehearse every renewal against the staging authority, writing nothing"
+    },
+    {
+      "key": "F",
+      "action": "Force the selected certificate to renew now, rate limit and all"
     },
     {
       "key": "/",
-      "action": "Filter the list"
+      "action": "Filter the rows of the current screen"
     },
     {
-      "key": "r / ctrl+r",
-      "action": "Re-read the directory"
+      "key": "R",
+      "action": "Re-read this machine"
     },
     {
       "key": "?",
@@ -52,84 +92,156 @@
   ],
   "backends": [
     {
-      "name": "coreutils",
-      "binary": "touch",
+      "name": "certbot",
+      "binary": "certbot",
       "versionCommand": [
-        "touch",
+        "certbot",
         "--version"
       ],
-      "versionRegex": "coreutils\\) ([0-9][0-9.]*)",
-      "minimum": "8.0",
+      "versionRegex": "certbot (\\d+\\.\\d+(?:\\.\\d+)?)",
+      "minimum": "1.0",
       "searchPaths": [
-        "/usr/bin/touch",
-        "/bin/touch"
+        "/usr/bin/certbot",
+        "/bin/certbot",
+        "/snap/bin/certbot",
+        "/usr/local/bin/certbot"
+      ],
+      "notes": [
+        {
+          "range": ">=1.0",
+          "impact": "certbot is optional: without it the inventory, the chain validation, the key match and the live check all still work, and only the renewal screen's two keys say there is nothing here to renew with"
+        },
+        {
+          "range": "<2.0",
+          "impact": "a certificate renewed by this certbot keeps the RSA key type it was issued with; from 2.0 the default became ECDSA, so a renewal there can change the key type of a certificate a client was pinned to"
+        }
+      ],
+      "tested": []
+    },
+    {
+      "name": "acme-sh",
+      "binary": "acme.sh",
+      "versionCommand": [
+        "acme.sh",
+        "--version"
+      ],
+      "versionRegex": "v(\\d+\\.\\d+\\.\\d+)",
+      "minimum": "3.0.0",
+      "searchPaths": [
+        "/usr/local/bin/acme.sh",
+        "/usr/bin/acme.sh",
+        "/root/.acme.sh/acme.sh"
+      ],
+      "notes": [
+        {
+          "range": ">=3.0.0",
+          "impact": "acme.sh renews from a crontab entry rather than a systemd timer, and tui-cert reads nobody's crontab: the renewal screen says so instead of claiming nothing is scheduled"
+        }
+      ],
+      "tested": []
+    },
+    {
+      "name": "openssl",
+      "binary": "openssl",
+      "versionCommand": [
+        "openssl",
+        "version"
+      ],
+      "versionRegex": "OpenSSL (\\d+\\.\\d+\\.\\d+)",
+      "minimum": "1.1.1",
+      "searchPaths": [
+        "/usr/bin/openssl",
+        "/bin/openssl"
       ],
       "features": [
         {
-          "name": "no-dereference",
-          "since": "8.1"
+          "name": "addext",
+          "since": "1.1.1"
         }
       ],
       "notes": [
         {
-          "range": "<8.1",
-          "impact": "`touch -h` is missing, so the timestamp of a symlink is set on its target instead of on the link"
+          "range": "<1.1.1",
+          "impact": "`openssl req` has no `-addext`, so a subject alternative name cannot be set on the command line; tui-cert will not write an openssl configuration file, so the generate keys say why they are unavailable rather than producing a certificate no client accepts"
+        },
+        {
+          "range": ">=1.1.1",
+          "impact": "openssl is only ever used to generate a key pair; nothing is read with it, so a machine without it loses two keys and keeps every screen"
         }
-      ]
+      ],
+      "tested": []
     }
   ],
   "install": {
-    "source": {
-      "available": true,
-      "command": "git clone https://github.com/tui-tools/tui-template\ncd tui-template && make demo",
-      "url": "https://github.com/tui-tools/tui-template",
-      "note": "Or press \"Use this template\" on GitHub, which is the point of it."
-    },
     "pacman": {
       "available": false,
-      "package": "tui-template",
+      "package": "tui-cert",
       "repo": "tui-tools",
       "requires_repo_setup": true,
-      "command": "sudo pacman -S tui-template",
+      "command": "sudo pacman -S tui-cert",
       "url": "https://pkgs.tui.tools/arch",
-      "note": "The template is never packaged. This entry shows your tool's shape."
+      "note": "Add the tui-tools repository to pacman.conf first."
+    },
+    "aur": {
+      "available": false,
+      "package": "tui-cert-bin",
+      "repo": "aur",
+      "command": "paru -S tui-cert-bin",
+      "url": "https://aur.archlinux.org/packages/tui-cert-bin",
+      "note": "The -bin package installs the released static binary."
     },
     "apt": {
       "available": false,
-      "package": "tui-template",
+      "package": "tui-cert",
       "repo": "tui-tools",
       "requires_repo_setup": true,
-      "command": "sudo apt install tui-template",
+      "command": "sudo apt install tui-cert",
       "url": "https://pkgs.tui.tools/deb",
-      "note": "The template is never packaged. This entry shows your tool's shape."
+      "note": "Add the tui-tools apt repository and its keyring first."
     },
     "dnf": {
       "available": false,
-      "package": "tui-template",
+      "package": "tui-cert",
       "repo": "tui-tools",
       "requires_repo_setup": true,
-      "command": "sudo dnf install tui-template",
+      "command": "sudo dnf install tui-cert",
       "url": "https://pkgs.tui.tools/rpm",
-      "note": "The template is never packaged. This entry shows your tool's shape."
+      "note": "Add the tui-tools.repo file first."
+    },
+    "zypper": {
+      "available": false,
+      "package": "tui-cert",
+      "repo": "tui-tools",
+      "requires_repo_setup": true,
+      "command": "sudo zypper install tui-cert",
+      "url": "https://pkgs.tui.tools/rpm",
+      "note": "Add the tui-tools repository first."
     },
     "binary": {
-      "available": false,
-      "pattern": "tui-template_{version}_linux_{arch}.tar.gz",
-      "command": "curl -fsSL https://github.com/tui-tools/tui-template/releases/download/v{version}/tui-template_{version}_linux_{arch}.tar.gz | tar -xz tui-template\nsudo install -m0755 tui-template /usr/local/bin/tui-template",
-      "url": "https://github.com/tui-tools/tui-template/releases",
-      "note": "The template is never released. Your tool is, once you tag v0.1.0."
+      "available": true,
+      "pattern": "tui-cert_{version}_linux_{arch}.tar.gz",
+      "command": "curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v{version}/tui-cert_{version}_linux_{arch}.tar.gz | tar -xz tui-cert\nsudo install -m0755 tui-cert /usr/local/bin/tui-cert",
+      "url": "https://github.com/tui-tools/tui-cert/releases",
+      "note": "One static binary. Verify it against checksums.txt from the same release."
+    },
+    "source": {
+      "available": true,
+      "command": "git clone https://github.com/tui-tools/tui-cert\ncd tui-cert && make build\nsudo install -m0755 bin/tui-cert /usr/local/bin/tui-cert",
+      "url": "https://github.com/tui-tools/tui-cert",
+      "note": "Needs Go 1.27 or newer."
     }
   },
   "security": {
-    "needs_sudo": "Only the touch action escalates, and only when the configured prefix is non-empty. Listing a directory is an ordinary read. Replace this sentence with what your own tool escalates for.",
+    "needs_sudo": "Three reads escalate through `sudo -n`, which never prompts: `ls`, `stat` and `cat`, for the certificate directories an ordinary user cannot open — /etc/letsencrypt and /etc/ssl/private on every distribution. A private key is never read through sudo. Renewing and generating escalate too.",
     "preview_before_run": true,
     "no_daemon": true,
-    "no_network": true,
+    "no_network": false,
+    "no_network_note": "One TLS handshake to a host:port you type, and only when you press `c`. Nothing is sent over it and the socket is closed as soon as the certificate is read. Starting the tool, and `--check`, open no connection at all.",
     "static_binary": true,
     "signed_releases": false,
     "config_paths": [
-      "/etc/tui-template/config.toml",
-      "~/.config/tui-template/config.toml"
+      "/etc/tui-cert/config.toml",
+      "~/.config/tui-cert/config.toml"
     ]
   },
   "maintainers": [
@@ -138,12 +250,17 @@
       "github": "edimarlnx"
     }
   ],
-  "since": "2026-08-29",
+  "since": "2026-08-30",
   "keywords": [
-    "template",
-    "scaffold",
-    "bubbletea",
-    "starter"
-  ],
-  "unreleased": true
+    "tls",
+    "ssl",
+    "x509",
+    "certificates",
+    "letsencrypt",
+    "certbot",
+    "acme",
+    "expiry",
+    "tui",
+    "bubbletea"
+  ]
 }

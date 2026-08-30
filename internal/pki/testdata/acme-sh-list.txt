@@ -1,0 +1,3 @@
+Main_Domain    KeyLength  SAN_Domains          CA               Created               Renew
+mail.example.org  "ec-256"  imap.example.org,smtp.example.org  ZeroSSL.com  Fri May  1 03:11:02 UTC 2026  Wed Jul 30 03:11:02 UTC 2026
+vpn.example.org  "4096"  no  Let's Encrypt  Sat Jun 14 22:04:51 UTC 2026  Thu Sep 11 22:04:51 UTC 2026

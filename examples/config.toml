@@ -1,14 +1,31 @@
-# tui-template configuration.
+# tui-cert configuration.
 #
-# Read from /etc/tui-template/config.toml first, then
-# ~/.config/tui-template/config.toml, with the user file overriding the
-# machine-wide one. TUI_TEMPLATE_* environment variables override both, and
-# command line flags override everything.
+# Read from /etc/tui-cert/config.toml first, then ~/.config/tui-cert/config.toml,
+# with the user file overriding the machine-wide one. TUI_CERT_* environment
+# variables override both, and command line flags override everything.
 
-# This tool's own key: the directory to list. Replace it with yours.
-dir = "."
+# Extra certificate files or directories to scan, on top of the well-known
+# locations (/etc/letsencrypt, /etc/ssl/private, /etc/pki/tls, and the paths an
+# nginx, Apache or Caddy configuration names).
+#
+# The format is a list separated by colons, the way $PATH is written, because
+# the family's configuration files are flat `key = "value"` pairs and this key
+# has to survive that. A directory is walked two levels deep; a file is taken
+# as it is.
+paths = ""
+
+# Where `n` and `s` write a generated certificate. Empty picks
+# /etc/ssl/tui-cert when tui-cert is running as root, and
+# ~/.local/share/tui-cert when it is not — so an ordinary user is never handed
+# a plan that fails on its first command.
+create-dir = ""
 
 # Privilege escalation prefix used for actions; "" runs the command directly.
+#
+# It also covers three reads: `ls`, `stat` and `cat` for the certificate
+# directories an ordinary user cannot open, which on every distribution
+# includes /etc/letsencrypt and /etc/ssl/private. A private key is never read
+# through it.
 sudo = "sudo -n"
 
 # Path to an Omarchy-style colors.toml. Empty follows the active Omarchy
@@ -16,5 +33,7 @@ sudo = "sudo -n"
 theme = ""
 
 # Every key can also be set in the environment, upper-cased and prefixed:
-#   TUI_TEMPLATE_DIR=/srv
-#   TUI_TEMPLATE_SUDO="doas"
+#   TUI_CERT_PATHS="/srv/tls:/opt/company/certs"
+#   TUI_CERT_CREATE_DIR=/srv/tls
+#   TUI_CERT_SUDO="doas"
+#   TUI_CERT_THEME=/etc/tui/colors.toml

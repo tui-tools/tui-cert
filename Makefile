@@ -1,8 +1,8 @@
-# tui-template — build, test and lint.
+# tui-cert — build, test and lint.
 
 GO      ?= go
 BIN     ?= bin
-TOOL    := tui-template
+TOOL    := tui-cert
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 # The screenshot renderer is shared by the whole family and ships with the
@@ -64,8 +64,10 @@ tidy:
 ## screenshots: re-render the README frames from --demo (needs chrome/chromium).
 screenshots: build
 	python3 $(KIT)/tools/render-screenshots.py \
-		--bin $(BIN)/$(TOOL) --name $(TOOL) --out docs/screenshots \
-		--screen main= --screen touch=t --screen help=?
+		--bin $(BIN)/$(TOOL) --name $(TOOL) --out docs/screenshots --budget 10 \
+		--screen main= --screen 'detail=\r' --screen renewal=2 \
+		--screen 'live=jc' --screen create=n \
+		--screen help=?
 
 ## readme: regenerate the generated README sections from tool.json.
 readme:

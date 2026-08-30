@@ -1,0 +1,15 @@
+api.example.com {
+	# An explicit pair: the certificate first, its key second.
+	tls /etc/ssl/private/api.example.com.pem /etc/ssl/private/api.example.com.key
+	reverse_proxy 127.0.0.1:8080
+}
+
+auto.example.com {
+	# Caddy's own certificate, which is not a file this tool goes looking for.
+	tls me@example.com
+	respond "ok"
+}
+
+internal.example.com {
+	tls internal
+}

@@ -1,8 +1,8 @@
 # Shared Dependabot configuration for the tui-tools family.
 #
-# Copy to .github/dependabot.yml at the root of the tool's repository. The
-# family pins nothing by hand, so this is what keeps a tool's dependencies and
-# its CI actions current between releases.
+# Copied from tui-template unchanged. The family pins nothing by hand, so this
+# is what keeps a tool's dependencies and its CI actions current between
+# releases.
 #
 # No commit-message prefix is set on purpose: Dependabot's default subject
 # ("Bump x from a to b") already reads like the plain imperative sentences the

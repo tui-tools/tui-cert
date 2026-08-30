@@ -1,9 +1,9 @@
 # Shared golangci-lint configuration for the tui-tools family.
 #
-# Copy to .golangci.yml at the root of the tool's repository, unchanged: every
-# tool in the family is held to the same bar, so a lint that passes here passes
-# everywhere. Nothing is excluded wholesale — a finding that is deliberate gets
-# a targeted //nolint on the line, with a comment saying why.
+# Copied from tui-template unchanged: every tool in the family is held to the
+# same bar, so a lint that passes here passes everywhere. Nothing is excluded
+# wholesale — a finding that is deliberate gets a targeted //nolint on the
+# line, with a comment saying why.
 version: "2"
 
 linters:
