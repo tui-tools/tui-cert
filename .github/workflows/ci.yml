@@ -142,11 +142,14 @@ jobs:
 
       - name: package metadata matches the manifest
         run: |
-          # Pinned: check-nfpm.py reads .goreleaser.yaml, so the parser it
-          # uses is part of the check. Bump it here by hand.
-          python3 -m pip install --quiet --disable-pip-version-check pyyaml==6.0.3
           go mod download github.com/tui-tools/tui-kit
           kit=$(go list -m -f '{{.Dir}}' github.com/tui-tools/tui-kit)
+          # check-nfpm.py reads .goreleaser.yaml, so the parser it uses is
+          # part of the check. The kit pins it by version and by the hash of
+          # every wheel of that version (tools/requirements.txt), and pip
+          # refuses anything that does not match.
+          python3 -m pip install --quiet --disable-pip-version-check \
+            --require-hashes -r "$kit/tools/requirements.txt"
           python3 "$kit/tools/check-nfpm.py" --manifest tool.json \
             --config .goreleaser.yaml
 
@@ -257,6 +260,7 @@ jobs:
       # produced each file. `gh attestation verify <file> -R tui-tools/tui-cert`
       # checks a download against it without any key to distribute.
       - name: attest build provenance
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
@@ -265,3 +269,14 @@ jobs:
             dist/*.rpm
             dist/*.pkg.tar.zst
             dist/checksums.txt
+
+      # The attestation lives in GitHub's store, which `gh attestation verify`
+      # reads; Scorecard's Signed-Releases check reads the release's assets
+      # instead, and looks for a `*.intoto.jsonl`. The same bundle, attached
+      # under that name, satisfies both readers.
+      - name: attach the provenance bundle to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp "${{ steps.attest.outputs.bundle-path }}" dist/provenance.intoto.jsonl
+          gh release upload "$GITHUB_REF_NAME" dist/provenance.intoto.jsonl --clobber
