@@ -150,3 +150,25 @@ changelog:
 
 release:
   prerelease: auto
+  # The release notes a person reads first. GoReleaser's own changelog — the
+  # commit list — is appended below this block, and a bare commit list is not
+  # a description of a release: it says what was touched, not what changed for
+  # somebody running the tool.
+  #
+  # `.TagBody` is the annotated tag's message, so the summary is written once,
+  # where the release is actually cut:
+  #
+  #   git tag -a v0.3.0 -m "<what changed for a user>"
+  #
+  # A lightweight tag leaves it blank, which is the reminder to write one.
+  header: |
+    ## tui-cert {{ .Tag }}
+
+    {{ .TagBody }}
+
+    Built by this repository's CI on the tag itself. Each archive ships a
+    CycloneDX SBOM, `checksums.txt` carries a keyless cosign signature, and
+    every file has SLSA build provenance — see the README's "Verify a
+    download" for the two commands that check them.
+
+    The commits in this release:

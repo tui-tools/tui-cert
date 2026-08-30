@@ -2,6 +2,10 @@
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/tui-tools/tui-cert/badge)](https://scorecard.dev/viewer/?uri=github.com/tui-tools/tui-cert)
 
+> **Beta.** Beta: the family is days old and still changing. Package names,
+> flags and keys may move without notice until 1.0. Pin versions, and report
+> what breaks.
+
 A terminal UI for the TLS certificates on this machine. It finds them, puts them
 on one screen **worst first**, and tells you which one is going to stop working
 and when — and it **previews the exact command line of every change before
@@ -126,7 +130,7 @@ Upgrades then arrive with the rest of your system updates.
 ### Any distribution, static binary
 
 ```sh
-curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v0.1.1/tui-cert_0.1.1_linux_amd64.tar.gz | tar -xz tui-cert
+curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v0.1.2/tui-cert_0.1.2_linux_amd64.tar.gz | tar -xz tui-cert
 sudo install -m0755 tui-cert /usr/local/bin/tui-cert
 ```
 
@@ -645,6 +649,16 @@ widgets, the config loader and the command runner shared by the whole family.
   key, and it sends nothing.
 - `tui-cert` re-reads the machine after every change, so what you see is what
   the system reports, not what the tool assumed.
+
+## Contributing
+
+Contributions arrive as pull requests: the workflow, the commit conventions and
+what a change is expected to carry with it are in the family's
+[CONTRIBUTING.md](https://github.com/tui-tools/tui-kit/blob/main/CONTRIBUTING.md).
+
+Vulnerabilities go through the family's
+[SECURITY.md](https://github.com/tui-tools/tui-kit/blob/main/SECURITY.md)
+instead, privately, never in a public issue.
 
 ## License
 

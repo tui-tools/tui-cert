@@ -13,6 +13,7 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/tui-tools/tui-cert/internal/certs"
 )
@@ -356,13 +357,27 @@ func SameKey(certKey, fileKey any) bool {
 	return ok && left.Equal(fileKey)
 }
 
+// hasControl reports whether a value read from another program carries a
+// control character.
+//
+// Nothing systemd, certbot or acme.sh really prints contains one, so a value
+// that does is a mangled read rather than data. It is dropped instead of
+// repaired, because both places it would go are places a stray carriage
+// return does damage: a field the UI draws on one line, and a lineage name
+// that ends up on a command line, where a CR would redraw the preview over
+// itself and break the family's one promise — the command you were shown is
+// the command that runs.
+func hasControl(value string) bool {
+	return strings.ContainsFunc(value, unicode.IsControl)
+}
+
 // ParseProperties reads `systemctl show` output into a map. The format is one
 // `Key=value` per line, and a value may itself contain an `=`.
 func ParseProperties(out string) map[string]string {
 	properties := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok || key == "" {
+		if !ok || key == "" || hasControl(key) || hasControl(value) {
 			continue
 		}
 		properties[key] = value
@@ -392,6 +407,9 @@ func ParseCertbotCertificates(out string) []certs.ACMECert {
 			continue
 		}
 		value = strings.TrimSpace(value)
+		if hasControl(value) {
+			continue
+		}
 		switch strings.TrimSpace(key) {
 		case "Certificate Name":
 			flush()
@@ -597,5 +615,12 @@ func SplitTarget(input string) (string, error) {
 	if strings.ContainsAny(target, " \t/\\") {
 		return "", fmt.Errorf("%q is not a host name", input)
 	}
-	return net.JoinHostPort(strings.Trim(target, "[]"), "443"), nil
+	// An IPv6 literal is typed in brackets and JoinHostPort puts them back, so
+	// they come off first. A bracket left anywhere else is not a host: joining
+	// it to a port would produce an address net.Dial cannot even read.
+	target = strings.Trim(target, "[]")
+	if target == "" || strings.ContainsAny(target, "[]") {
+		return "", fmt.Errorf("%q is not a host name", input)
+	}
+	return net.JoinHostPort(target, "443"), nil
 }
