@@ -156,12 +156,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      SITE_DISPATCH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
-      # The package repository builder. PKGS_DISPATCH_TOKEN is the one to
-      # set; SITE_DISPATCH_TOKEN is accepted as a fallback so a single
-      # organization token can drive both rebuilds.
-      PKGS_DISPATCH_TOKEN: ${{ secrets.PKGS_DISPATCH_TOKEN || secrets.SITE_DISPATCH_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -180,30 +174,3 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Tell the family website that a release shipped, so it rebuilds now
-      # instead of waiting for its hourly run. Inert until the repository
-      # secret SITE_DISPATCH_TOKEN exists: a fine-grained PAT with
-      # "Contents: read and write" on tui-tools/tui-tools.github.io.
-      - name: notify the website
-        if: env.SITE_DISPATCH_TOKEN != ''
-        env:
-          GH_TOKEN: ${{ env.SITE_DISPATCH_TOKEN }}
-        run: |
-          gh api repos/tui-tools/tui-tools.github.io/dispatches \
-            -f event_type=tool-released \
-            -f 'client_payload[tool]=tui-cert'
-
-      # Tell the package repository builder that new .deb/.rpm/pacman files
-      # exist, so pkgs.tui.tools picks them up now rather than on its weekly
-      # run. Inert until PKGS_DISPATCH_TOKEN exists: a fine-grained PAT with
-      # "Contents: read and write" on tui-tools/pkgs.
-      - name: notify the package repository
-        if: env.PKGS_DISPATCH_TOKEN != ''
-        env:
-          GH_TOKEN: ${{ env.PKGS_DISPATCH_TOKEN }}
-        run: |
-          gh api repos/tui-tools/pkgs/dispatches \
-            -f event_type=tool-released \
-            -f 'client_payload[tool]=tui-cert' \
-            -f "client_payload[version]=${GITHUB_REF_NAME#v}"
