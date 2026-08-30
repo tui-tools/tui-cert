@@ -1,0 +1,41 @@
+name: Bug report
+description: Something the tool got wrong on a real machine
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The most useful bug reports here quote the
+        output the tool showed and the output of the command it drives.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: Versions
+      description: |
+        Output of `tui-template --version`, your distribution and release, and the
+        version of the command the tool drives.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: |
+        Anything the tool printed, plus the raw output of the underlying
+        command if a parse looks wrong. Redact addresses you would rather not
+        publish.
+      render: shell
+  - type: checkboxes
+    id: demo
+    attributes:
+      label: Does it reproduce in demo mode?
+      options:
+        - label: I tried `tui-template --demo`

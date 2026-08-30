@@ -1,0 +1,59 @@
+# GoReleaser template for a tui-tools tool.
+#
+# Copy this to the tool's repository root as `.goreleaser.yaml` and replace
+# every tui-template with the tool name (`tui-firewall`). One repository, one
+# binary, one tag series: `git tag v0.1.0 && git push origin v0.1.0`.
+version: 2
+
+project_name: tui-template
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: tui-template
+    main: ./cmd/tui-template
+    binary: tui-template
+    env:
+      # Static binaries: no libc dependency, one file to copy anywhere.
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: tui-template
+    ids:
+      - tui-template
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+      - examples/config.toml
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  prerelease: auto

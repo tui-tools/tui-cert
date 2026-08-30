@@ -1,0 +1,174 @@
+# CI template for a tui-tools tool.
+#
+# Copy to .github/workflows/ci.yml in the tool's repository and replace every
+# tui-template with the tool name. It runs the same checks `make check` runs
+# locally, cross-compiles for both release targets, and on a `v*` tag lets
+# GoReleaser publish the binaries.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: vet, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # go.mod is the single place the family's Go version lives, so a
+          # bump there moves CI with it.
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "these files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # The family's lint bar, shared as .golangci.yml. Nothing is excluded
+      # wholesale: a deliberate finding carries a //nolint saying why.
+      #
+      # Built from source rather than downloaded: golangci-lint refuses a
+      # module whose language version is newer than the Go it was built with,
+      # and no released binary is built with 1.27 yet. goinstall compiles it
+      # with the Go set up above, so the lint tracks the toolchain.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          install-mode: goinstall
+
+      # The family's central promise — the command line you were shown is the
+      # one that ran — only holds while a single package can start a process.
+      # tui-kit ships the check, so every tool asserts the same boundary.
+      - name: exec boundary
+        run: |
+          go mod download github.com/tui-tools/tui-kit
+          kit=$(go list -m -f '{{.Dir}}' github.com/tui-tools/tui-kit)
+          bash "$kit/tools/check-exec.sh" .
+
+      # `tested` in the manifest is generated from compat/results.jsonl, and
+      # the README's Compatibility section is generated from the manifest. A
+      # claim that outran its evidence fails here.
+      - name: compatibility claims match the evidence
+        run: |
+          kit=$(go list -m -f '{{.Dir}}' github.com/tui-tools/tui-kit)
+          python3 "$kit/tools/compat-sync.py" --manifest tool.json \
+            --results compat/results.jsonl --check
+          python3 "$kit/tools/render-compat.py" --manifest tool.json \
+            --readme README.md --check
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: build
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/tui-template ./cmd/tui-template
+
+      - name: verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  cross-build:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # go.mod is the single place the family's Go version lives, so a
+          # bump there moves CI with it.
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: build static linux/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -o "/tmp/tui-template_${GOARCH}" ./cmd/tui-template
+
+  manifest:
+    name: validate tool.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # The schema is shared by the family and lives in tui-kit, so a tool
+      # cannot drift from it by editing a local copy.
+      - name: fetch the manifest schema from tui-kit
+        run: |
+          curl -fsSL --retry 3 -o /tmp/tool.schema.json \
+            https://raw.githubusercontent.com/tui-tools/tui-kit/main/schema/tool.schema.json
+
+      - name: validate tool.json
+        run: |
+          npx --yes -p ajv-cli@5 -p ajv-formats@3 ajv validate \
+            --spec=draft2020 -c ajv-formats \
+            -s /tmp/tool.schema.json -d tool.json
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [check, cross-build, manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SITE_DISPATCH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          # go.mod is the single place the family's Go version lives, so a
+          # bump there moves CI with it.
+          go-version-file: go.mod
+          check-latest: true
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tell the family website that a release shipped, so it rebuilds now
+      # instead of waiting for its hourly run. Inert until the repository
+      # secret SITE_DISPATCH_TOKEN exists: a fine-grained PAT with
+      # "Contents: read and write" on tui-tools/tui-tools.github.io.
+      - name: notify the website
+        if: env.SITE_DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.SITE_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/tui-tools/tui-tools.github.io/dispatches \
+            -f event_type=tool-released \
+            -f 'client_payload[tool]=tui-template'
