@@ -212,8 +212,12 @@ check "and says so on the mode line" \
   "$bin --demo --report" \
   '^mode: demo'
 
+# The distro and kernel lines are excluded from the host name search, and only
+# from that one: they come from /etc/os-release and from uname's release and
+# machine, never from the node name, so a machine whose host name is its
+# distribution ("fedora") would otherwise fail a check it passes.
 check "report leaks neither a home path nor the host name" \
-  "$bin --report | grep -cE '/home/|$(uname -n)' || true" \
+  "$bin --report | grep -vE '^(distro|kernel): ' | grep -cE '/home/|$(uname -n)' || true" \
   '^0$'
 
 # --- a certificate this script chose ----------------------------------------
