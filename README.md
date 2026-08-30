@@ -140,9 +140,7 @@ sudo install -m0755 bin/tui-cert /usr/local/bin/tui-cert
 
 Needs Go 1.27 or newer.
 
-The distribution packages are not published yet. The commands below are here so
-you know what they will be; a package repository at `pkgs.tui.tools` is what
-turns them on.
+Not packaged for these yet; the static binary works everywhere in the meantime.
 
 ### Arch Linux (AUR) — coming soon
 
