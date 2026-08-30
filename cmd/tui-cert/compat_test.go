@@ -75,7 +75,20 @@ func TestVersionRegexReadsRealOutput(t *testing.T) {
 			"OpenSSL 3.2.6 30 Sep 2025 (Library: OpenSSL 3.2.6 30 Sep 2025)",
 			"3.2.6"},
 		{backendOpenSSL, "OpenSSL 1.1.1f  31 Mar 2020", "1.1.1"},
-		{backendOpenSSL, "OpenSSL 3.0.13 30 Jan 2024", "3.0.13"},
+		// The three the lab really met, copied from `openssl version` on the
+		// guests rather than reconstructed: Ubuntu 24.04, Fedora 44 and
+		// Omarchy Server 4.0.1. The doubled banner is what openssl prints when
+		// the library matches the binary, and the release date beside each
+		// version is the part a lazy regex reads instead of the version.
+		{backendOpenSSL,
+			"OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)",
+			"3.0.13"},
+		{backendOpenSSL,
+			"OpenSSL 3.5.5 27 Jan 2026 (Library: OpenSSL 3.5.5 27 Jan 2026)",
+			"3.5.5"},
+		{backendOpenSSL,
+			"OpenSSL 3.6.4 25 Aug 2026 (Library: OpenSSL 3.6.4 25 Aug 2026)",
+			"3.6.4"},
 	}
 	for _, test := range tests {
 		b := backend(t, test.backend)

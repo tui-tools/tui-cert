@@ -1,0 +1,3 @@
+{"backend": "openssl", "date": "2026-08-30", "distro": "fedora-44", "result": "pass", "suite": "smoke", "tool": "tui-cert", "version": "3.5.5"}
+{"backend": "openssl", "date": "2026-08-30", "distro": "omarchy-server-4.0.1", "result": "pass", "suite": "smoke", "tool": "tui-cert", "version": "3.6.4"}
+{"backend": "openssl", "date": "2026-08-30", "distro": "ubuntu-24.04", "result": "pass", "suite": "smoke", "tool": "tui-cert", "version": "3.0.13"}

@@ -169,7 +169,11 @@
           "impact": "openssl is only ever used to generate a key pair; nothing is read with it, so a machine without it loses two keys and keeps every screen"
         }
       ],
-      "tested": []
+      "tested": [
+        "3.0.13",
+        "3.5.5",
+        "3.6.4"
+      ]
     }
   ],
   "install": {

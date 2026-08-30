@@ -27,7 +27,7 @@ being served. `tui-cert` puts them on one screen, in the
 ### Any distribution, static binary
 
 ```sh
-curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v{version}/tui-cert_{version}_linux_amd64.tar.gz | tar -xz tui-cert
+curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v0.1.0/tui-cert_0.1.0_linux_amd64.tar.gz | tar -xz tui-cert
 sudo install -m0755 tui-cert /usr/local/bin/tui-cert
 ```
 
@@ -460,7 +460,7 @@ hidden; one below the minimum is marked as such and the tool still runs.
 | Binary | `openssl` |
 | Version read with | `openssl version` |
 | Minimum | 1.1.1 |
-| Tested | none yet |
+| Tested | `3.0.13`, `3.5.5`, `3.6.4` |
 | Version-gated features | `addext` (since 1.1.1) |
 
 | Versions | What changes |

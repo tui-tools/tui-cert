@@ -146,7 +146,16 @@ check "the optional programs are reported" \
   "$bin --check" \
   '"purpose":'
 
-# 4. certbot, when it is here, is read and its timer state reported.
+# 4. certbot, when it is here, is read and its timer state reported; and when
+#    it is not, that is said plainly rather than passed over. No image in the
+#    lab ships certbot, so the absent branch is the one that actually runs, and
+#    it went unasserted until a real machine made that obvious: a tool that
+#    quietly omits the ACME client on a machine without one is indistinguishable
+#    from one whose probe failed.
+#
+#    The report is flattened first, because these are nested objects and a
+#    per-line grep cannot tie a name to the field beside it.
+flat=$("$bin" --check 2>/dev/null | tr -d ' \n')
 if command -v certbot >/dev/null 2>&1; then
   check "certbot is reported as present" \
     "$bin --check" \
@@ -154,6 +163,29 @@ if command -v certbot >/dev/null 2>&1; then
   check "the renewal timer state is read" \
     "$bin --check" \
     '"timerActive": (true|false)'
+else
+  if grep -qF '"name":"certbot","present":false' <<<"$flat"; then
+    printf 'PASS  certbot is reported as absent, with the purpose it would serve\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  certbot is absent here but the report does not say so\n'
+    fail=$((fail + 1))
+  fi
+
+  # No client means no renewal, and an invented one would be worse than none.
+  check "no renewal was invented" "$bin --check" '"acme": \[\]'
+  check_absent "no renewal timer state is claimed" "$bin --check" '"timerActive":'
+
+  # And the Let's Encrypt directory is still *reported* as looked at, with the
+  # reason it yielded nothing. A location silently dropped is the bug that
+  # empties this screen on the machines that matter most.
+  if grep -qF '"path":"/etc/letsencrypt/live"' <<<"$flat"; then
+    printf 'PASS  /etc/letsencrypt/live is reported as searched, with a reason\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL  /etc/letsencrypt/live was dropped from the searched locations\n'
+    fail=$((fail + 1))
+  fi
 fi
 
 # --- a certificate this script chose ----------------------------------------
