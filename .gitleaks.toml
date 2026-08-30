@@ -30,6 +30,9 @@ tags = ["privacy", "path"]
 regexTarget = "secret"
 regexes = [
   '''^(user|username|you|me|example|root|runner|ubuntu|debian|fedora|arch|vagrant|linuxbrew|Shared)$''',
+  # The stand-in people of the family's demos, fixtures and screenshots, and
+  # the placeholder every manual page reaches for. Invented, not captured.
+  '''^(ana|alice|bob|johndoe)$''',
 ]
 
 # Build output. CI scans a fresh checkout, where none of this exists, but a

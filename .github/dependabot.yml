@@ -1,8 +1,8 @@
 # Shared Dependabot configuration for the tui-tools family.
 #
-# Copied from tui-template unchanged. The family pins nothing by hand, so this
-# is what keeps a tool's dependencies and its CI actions current between
-# releases.
+# Copy to .github/dependabot.yml at the root of the tool's repository. The
+# family pins nothing by hand, so this is what keeps a tool's dependencies and
+# its CI actions current between releases.
 #
 # No commit-message prefix is set on purpose: Dependabot's default subject
 # ("Bump x from a to b") already reads like the plain imperative sentences the
@@ -26,7 +26,13 @@ updates:
           - minor
           - patch
 
-  # The workflow's own actions, grouped the same way.
+  # The workflow's own actions, grouped the same way. Directory "/" is what
+  # Dependabot reads as .github/workflows, and it rewrites a SHA pin together
+  # with its trailing version comment, which is how the workflows stay pinned
+  # to commits without going stale.
+  #
+  # It does not see the versions a `run:` step installs — govulncheck, pyyaml,
+  # gitleaks — so those are pinned and bumped inside the workflow.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

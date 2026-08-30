@@ -243,7 +243,7 @@
     "no_network": false,
     "no_network_note": "One TLS handshake to a host:port you type, and only when you press `c`. Nothing is sent over it and the socket is closed as soon as the certificate is read. Starting the tool, and `--check`, open no connection at all.",
     "static_binary": true,
-    "signed_releases": false,
+    "signed_releases": true,
     "config_paths": [
       "/etc/tui-cert/config.toml",
       "~/.config/tui-cert/config.toml"
