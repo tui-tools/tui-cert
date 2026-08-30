@@ -2,9 +2,9 @@
 
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/tui-tools/tui-cert/badge)](https://scorecard.dev/viewer/?uri=github.com/tui-tools/tui-cert)
 
-> **Beta.** Beta: the family is days old and still changing. Package names,
-> flags and keys may move without notice until 1.0. Pin versions, and report
-> what breaks.
+> **Beta.** The family is days old and still changing. Package names, flags
+> and keys may move without notice until 1.0. Pin versions, and report what
+> breaks.
 
 A terminal UI for the TLS certificates on this machine. It finds them, puts them
 on one screen **worst first**, and tells you which one is going to stop working
