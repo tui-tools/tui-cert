@@ -93,6 +93,8 @@ manifest:
 	@npx --yes -p ajv-cli@5 -p ajv-formats@3 ajv validate \
 		--spec=draft2020 -c ajv-formats \
 		-s /tmp/tui-tool.schema.json -d tool.json
+	@python3 $(KIT)/tools/check-nfpm.py --manifest tool.json \
+		--config .goreleaser.yaml
 
 ## clean: remove build output.
 clean:

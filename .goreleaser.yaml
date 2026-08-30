@@ -41,6 +41,57 @@ archives:
       - README.md
       - examples/config.toml
 
+# The distribution packages. Three formats times two architectures is six
+# files per release, and they are what pkgs.tui.tools indexes into the apt,
+# dnf and pacman repositories: a tool is then installed and upgraded the way
+# everything else on the machine is.
+#
+# GoReleaser cannot read tool.json, so `description` below is a copy of the
+# manifest's tagline. tui-kit/tools/check-nfpm.py asserts the two are
+# identical, and `make manifest` runs it, so the copy cannot drift.
+nfpms:
+  - id: tui-cert
+    ids:
+      - tui-cert
+    package_name: tui-cert
+    formats:
+      - deb
+      - rpm
+      - archlinux
+    # Each ecosystem's own naming, so the files look native where they land:
+    # tui-cert_0.1.0_amd64.deb, tui-cert-0.1.0.x86_64.rpm,
+    # tui-cert-0.1.0-1-x86_64.pkg.tar.zst.
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: tui-tools
+    homepage: https://tui.tools/tools/tui-cert/
+    maintainer: tui-tools <maintainers@tui.tools>
+    description: "Every certificate on the machine, and what will stop working when"
+    license: MIT
+    # The binary belongs in the distribution's own path, not /usr/local: it
+    # arrives through the package manager, so the package manager owns it.
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/tui-cert/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/tui-cert/LICENSE
+      - src: examples/config.toml
+        dst: /usr/share/doc/tui-cert/config.toml
+    # The package owns the binary name, so anything else shipping the same
+    # command — an AUR -bin build, a hand-rolled local package — is a
+    # conflict rather than a silent overwrite.
+    provides:
+      - tui-cert
+    conflicts:
+      - tui-cert-bin
+    rpm:
+      group: Applications/System
+    archlinux:
+      pkgbase: tui-cert
+      packager: tui-tools <maintainers@tui.tools>
+
 checksum:
   name_template: checksums.txt
 

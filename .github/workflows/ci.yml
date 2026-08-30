@@ -132,6 +132,23 @@ jobs:
             --spec=draft2020 -c ajv-formats \
             -s /tmp/tool.schema.json -d tool.json
 
+      # GoReleaser cannot read tool.json, so the package description in
+      # .goreleaser.yaml is a copy of the manifest's tagline. This is what
+      # stops the copy from drifting, and it checks the rest of the package
+      # metadata the family fixed by convention along with it.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: package metadata matches the manifest
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          go mod download github.com/tui-tools/tui-kit
+          kit=$(go list -m -f '{{.Dir}}' github.com/tui-tools/tui-kit)
+          python3 "$kit/tools/check-nfpm.py" --manifest tool.json \
+            --config .goreleaser.yaml
+
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -141,6 +158,10 @@ jobs:
       contents: write
     env:
       SITE_DISPATCH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+      # The package repository builder. PKGS_DISPATCH_TOKEN is the one to
+      # set; SITE_DISPATCH_TOKEN is accepted as a fallback so a single
+      # organization token can drive both rebuilds.
+      PKGS_DISPATCH_TOKEN: ${{ secrets.PKGS_DISPATCH_TOKEN || secrets.SITE_DISPATCH_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -172,3 +193,17 @@ jobs:
           gh api repos/tui-tools/tui-tools.github.io/dispatches \
             -f event_type=tool-released \
             -f 'client_payload[tool]=tui-cert'
+
+      # Tell the package repository builder that new .deb/.rpm/pacman files
+      # exist, so pkgs.tui.tools picks them up now rather than on its weekly
+      # run. Inert until PKGS_DISPATCH_TOKEN exists: a fine-grained PAT with
+      # "Contents: read and write" on tui-tools/pkgs.
+      - name: notify the package repository
+        if: env.PKGS_DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.PKGS_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/tui-tools/pkgs/dispatches \
+            -f event_type=tool-released \
+            -f 'client_payload[tool]=tui-cert' \
+            -f "client_payload[version]=${GITHUB_REF_NAME#v}"
