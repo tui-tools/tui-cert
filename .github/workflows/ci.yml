@@ -175,7 +175,7 @@ jobs:
       # bump the version here when golang/vuln cuts a release.
       - name: govulncheck
         env:
-          GOVULNCHECK_VERSION: "v1.1.4"
+          GOVULNCHECK_VERSION: "v1.7.0"
         run: |
           go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           govulncheck ./...
