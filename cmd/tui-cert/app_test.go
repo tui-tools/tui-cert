@@ -10,6 +10,7 @@ import (
 	"github.com/tui-tools/tui-cert/internal/pki"
 	"github.com/tui-tools/tui-kit/compat"
 	"github.com/tui-tools/tui-kit/theme"
+	"github.com/tui-tools/tui-kit/ui"
 )
 
 // newTestApp builds an app on the sample machine, sized like a normal terminal
@@ -555,6 +556,16 @@ func TestRendersAtEveryWidth(t *testing.T) {
 		a.mode = modeForm
 		a.form = newCreateForm(certs.CreateSelfSigned, a.caps, a.model.Hostname)
 		checkWidth(t, a, "form", width)
+
+		a.form = newObtainForm(pki.BinCertbot, a.model.Hostname, "")
+		checkWidth(t, a, "obtain form", width)
+
+		a.mode = modePicker
+		a.picker = ui.NewPicker("Install where",
+			[]string{"nginx: /etc/ssl/private/api.example.com.pem + " +
+				"/etc/ssl/private/api.example.com.key"}, "")
+		checkWidth(t, a, "install picker", width)
+		a.mode = modeBrowse
 	}
 	a.mode = modeBrowse
 }
@@ -594,5 +605,251 @@ func TestBusyStateSwallowsInput(t *testing.T) {
 	drain(t, a, press(a, "d"))
 	if a.mode != modeBrowse || len(backend.Ran()) != 0 {
 		t.Errorf("a key pressed while a command runs must be ignored")
+	}
+}
+
+// TestObtainBuildsTheExactCertbotCommand: the obtain form is a form only so
+// that the command line at the end of it is one nobody had to remember.
+func TestObtainBuildsTheExactCertbotCommand(t *testing.T) {
+	a, backend := newTestApp(t)
+	gotoScreen(t, a, screenACME)
+
+	drain(t, a, press(a, "I"))
+	if a.mode != modeForm {
+		t.Fatalf("I did not open the obtain form (status: %s)", a.status)
+	}
+	a.form.values[fieldDomains] = "new.example.com, www.new.example.com"
+	a.form.values[fieldEmail] = "ops@example.com"
+	a.form.values[fieldWebroot] = "/srv/www"
+	a.form.set(fieldAgree, agreeYes)
+	drain(t, a, press(a, "enter"))
+
+	if a.mode != modeConfirm {
+		t.Fatalf("the obtain form did not confirm (status: %s)", a.status)
+	}
+	want := "sudo -n certbot certonly --non-interactive --agree-tos -m ops@example.com " +
+		"--webroot -w /srv/www -d new.example.com -d www.new.example.com"
+	if got := a.confirm.Command; got != want {
+		t.Errorf("command = %q\nwant    = %q", got, want)
+	}
+	if !strings.Contains(a.confirm.Body, "rate limit") &&
+		!strings.Contains(a.confirm.Body, "5 failures") {
+		t.Errorf("the dialog does not say what a failure costs:\n%s", a.confirm.Body)
+	}
+	if len(backend.Ran()) != 0 {
+		t.Errorf("opening the dialog ran %d commands", len(backend.Ran()))
+	}
+}
+
+// TestStandaloneDropsTheWebroot: the two challenges have opposite requirements,
+// and the field only one of them has goes away with it.
+func TestStandaloneDropsTheWebroot(t *testing.T) {
+	a, _ := newTestApp(t)
+	gotoScreen(t, a, screenACME)
+	drain(t, a, press(a, "I"))
+
+	a.form.set(fieldMethod, string(certs.ObtainStandalone))
+	for _, field := range a.form.visible() {
+		if field.key == fieldWebroot {
+			t.Fatal("the standalone challenge still shows a webroot field")
+		}
+	}
+	a.form.values[fieldDomains] = "new.example.com"
+	a.form.values[fieldEmail] = "ops@example.com"
+	a.form.set(fieldAgree, agreeYes)
+	drain(t, a, press(a, "enter"))
+	if a.mode != modeConfirm {
+		t.Fatalf("the standalone form did not confirm (status: %s)", a.status)
+	}
+	if !strings.Contains(a.confirm.Command, "--standalone") ||
+		strings.Contains(a.confirm.Command, "--webroot") {
+		t.Errorf("command = %q", a.confirm.Command)
+	}
+	// The dialog has to say what standalone needs, because it is the opposite
+	// of what webroot needs.
+	if !strings.Contains(a.confirm.Body, "port 80") {
+		t.Errorf("the dialog does not say what standalone needs:\n%s", a.confirm.Body)
+	}
+}
+
+// TestNothingIsRequestedWithoutTheAgreement: agreeing to somebody else's terms
+// is not something a tool does on a user's behalf.
+func TestNothingIsRequestedWithoutTheAgreement(t *testing.T) {
+	a, backend := newTestApp(t)
+	gotoScreen(t, a, screenACME)
+	drain(t, a, press(a, "I"))
+
+	if got := a.form.values[fieldAgree]; got != agreeNo {
+		t.Errorf("the agreement field opens on %q, want %q", got, agreeNo)
+	}
+	a.form.values[fieldDomains] = "new.example.com"
+	a.form.values[fieldEmail] = "ops@example.com"
+	drain(t, a, press(a, "enter"))
+
+	if a.mode != modeForm {
+		t.Fatalf("an unaccepted agreement left the form (mode %v, status %q)",
+			a.mode, a.status)
+	}
+	if !strings.Contains(a.status, "agreement") {
+		t.Errorf("status = %q, want it to name the agreement", a.status)
+	}
+	if len(backend.Ran()) != 0 {
+		t.Errorf("a refused form ran %d commands", len(backend.Ran()))
+	}
+}
+
+// TestObtainRefusesAValueThatWouldReachAnArgv: every field is checked where the
+// argv is built, and the refusal names the rule that was broken.
+func TestObtainRefusesAValueThatWouldReachAnArgv(t *testing.T) {
+	cases := []struct {
+		what  string
+		field string
+		value string
+		says  string
+	}{
+		{"a domain that would be read as a flag", fieldDomains, "-x.example.com", "host name"},
+		{"an IP address", fieldDomains, "192.0.2.10", "IP address"},
+		{"an address that is not one", fieldEmail, "-x", "reach you at"},
+		{"a relative webroot", fieldWebroot, "www", "absolute path"},
+	}
+	for _, c := range cases {
+		t.Run(c.what, func(t *testing.T) {
+			a, backend := newTestApp(t)
+			gotoScreen(t, a, screenACME)
+			drain(t, a, press(a, "I"))
+			a.form.values[fieldDomains] = "new.example.com"
+			a.form.values[fieldEmail] = "ops@example.com"
+			a.form.values[fieldWebroot] = "/srv/www"
+			a.form.values[c.field] = c.value
+			a.form.set(fieldAgree, agreeYes)
+			drain(t, a, press(a, "enter"))
+
+			if a.mode != modeForm {
+				t.Fatalf("%s did not leave the form open (mode %v, status %q)",
+					c.what, a.mode, a.status)
+			}
+			if !strings.Contains(a.status, c.says) {
+				t.Errorf("status = %q, want it to mention %q", a.status, c.says)
+			}
+			if len(backend.Ran()) != 0 {
+				t.Errorf("a refused form ran %d commands", len(backend.Ran()))
+			}
+		})
+	}
+}
+
+// TestInstallCopiesToAPathTheScannerRead: the destination is chosen from what
+// the server configuration already names, so an installation cannot land
+// somewhere nothing will look.
+func TestInstallCopiesToAPathTheScannerRead(t *testing.T) {
+	a, backend := newTestApp(t)
+	entry := selectEntry(t, a, "shop.example.com")
+
+	drain(t, a, press(a, "i"))
+	if a.mode != modePicker {
+		t.Fatalf("i did not open the destination picker (status: %s)", a.status)
+	}
+	if len(a.installTo) == 0 {
+		t.Fatal("the picker opened with no destinations")
+	}
+	destination := a.installTo[0]
+	if destination.Server != "nginx" {
+		t.Errorf("the destination is %q, want the one nginx names", destination.Server)
+	}
+	drain(t, a, press(a, "enter"))
+
+	if a.mode != modeConfirm {
+		t.Fatalf("the picker did not reach a confirm (status: %s)", a.status)
+	}
+	lines := strings.Split(a.confirm.Command, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("previewed %d command lines, want 3:\n%s", len(lines),
+			a.confirm.Command)
+	}
+	wants := []string{
+		"install -m 644 " + entry.Path + " " + destination.CertPath,
+		"install -m 600 " + entry.Key.Path + " " + destination.KeyPath,
+		"systemctl reload nginx",
+	}
+	for i, want := range wants {
+		if !strings.Contains(lines[i], want) {
+			t.Errorf("line %d = %q, want it to contain %q", i+1, lines[i], want)
+		}
+	}
+	// The key is copied at 600 and the certificate at 644, and the modes are
+	// set by the command that writes the file rather than left to a umask.
+	if !strings.Contains(a.confirm.Body, destination.Reference.File) {
+		t.Errorf("the dialog does not say where the destination came from:\n%s",
+			a.confirm.Body)
+	}
+	if len(backend.Ran()) != 0 {
+		t.Errorf("opening the dialog ran %d commands", len(backend.Ran()))
+	}
+}
+
+// TestInstallWillNotWriteAFileOverItself: `install a a` truncates the file
+// before it reads it, so the choice that looks like a no-op is the one that
+// loses the certificate. It is never offered.
+func TestInstallWillNotWriteAFileOverItself(t *testing.T) {
+	a, _ := newTestApp(t)
+	entry := selectEntry(t, a, "api.example.com")
+
+	for _, destination := range a.destinationsFor(entry) {
+		if destination.CertPath == entry.Path || destination.KeyPath == entry.Key.Path {
+			t.Fatalf("%s is offered as its own destination", entry.Path)
+		}
+	}
+	drain(t, a, press(a, "i"))
+	if a.mode == modePicker {
+		t.Fatal("the certificate nginx already serves was offered a destination")
+	}
+	if !strings.Contains(a.status, "no nginx or Apache") {
+		t.Errorf("status = %q, want it to say why there is nowhere to install",
+			a.status)
+	}
+
+	// And the builder refuses it too, for the path that does not go through the
+	// picker.
+	_, err := a.backend.BuildInstall(a.model, certs.InstallRequest{
+		CertPath: entry.Path,
+		KeyPath:  entry.Key.Path,
+		To: certs.Destination{Server: "nginx", CertPath: entry.Path,
+			KeyPath: entry.Key.Path, Reload: "nginx"},
+	})
+	if err == nil {
+		t.Fatal("BuildInstall accepted a destination that is its own source")
+	}
+	if !strings.Contains(err.Error(), "truncates") {
+		t.Errorf("the refusal is %q", err)
+	}
+}
+
+// TestInstallNeedsBothHalves: a server needs a certificate and its key, and a
+// certificate with no key beside it is half of what it is asking for.
+func TestInstallNeedsBothHalves(t *testing.T) {
+	a, _ := newTestApp(t)
+	entry := selectEntry(t, a, "mail.example.org")
+	if entry.Key.Present {
+		t.Fatalf("the sample machine's orphan now has a key at %s", entry.Key.Path)
+	}
+	drain(t, a, press(a, "i"))
+	if a.mode == modePicker {
+		t.Fatal("a certificate with no key opened the destination picker")
+	}
+	if !strings.Contains(a.status, "private key") {
+		t.Errorf("status = %q, want it to name the missing key", a.status)
+	}
+}
+
+// TestHelpListsTheNewKeys: a key missing from the help is a key nobody finds.
+func TestHelpListsTheNewKeys(t *testing.T) {
+	var listed string
+	for _, hint := range helpKeys() {
+		listed += hint.Key + " "
+	}
+	for _, key := range []string{"I", "i", "n", "s", "d", "F", "c", "C"} {
+		if !strings.Contains(listed, key+" ") {
+			t.Errorf("the help screen does not list %q", key)
+		}
 	}
 }

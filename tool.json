@@ -3,7 +3,7 @@
   "name": "tui-cert",
   "binary": "tui-cert",
   "tagline": "Every certificate on the machine, and what will stop working when",
-  "description": "A terminal UI for the TLS certificates on this machine. It finds them — the Let's Encrypt tree, /etc/ssl, /etc/pki, the paths an nginx, Apache or Caddy configuration names — and puts them on one screen, worst first: expired, expiring, the ones whose private key is not their key, the ones whose key every account can read.\n\nReading is done in Go. crypto/x509 parses the chain, verifies it against the system trust store and compares the key, so the whole inventory works on a machine with no openssl, no certbot and nothing else installed. Those are optional and only ever used to act.\n\nThree more screens complete it: what certbot or acme.sh manages and whether its renewal timer is really running; a live TLS handshake, on demand, which is how a certificate renewed on disk and never reloaded shows itself; and where the tool looked, including what it could not open.\n\nEvery change is previewed as the exact command line: a rehearsed renewal, a forced one with what it costs in rate limit, or a generated key pair.\n\nRun `tui-cert --demo` for a sample machine with seven certificates in seven states, and nothing touched.",
+  "description": "A terminal UI for the TLS certificates on this machine. It finds them — the Let's Encrypt tree, /etc/ssl, /etc/pki, the paths an nginx, Apache or Caddy configuration names — and puts them on one screen, worst first: expired, expiring, the ones whose private key is not their key, the ones whose key every account can read.\n\nReading is done in Go. crypto/x509 parses the chain, verifies it against the system trust store and compares the key, so the whole inventory works on a machine with nothing else installed. openssl, certbot and acme.sh are optional, and only used to act.\n\nTwo more screens complete it: what certbot or acme.sh manages and whether its timer is really running, and a live TLS handshake on demand — how a certificate renewed on disk and never reloaded shows itself.\n\nEvery change is previewed as the exact command line. `I` obtains a certificate this machine does not have yet, by webroot or standalone, and requests nothing until the agreement says yes. `i` installs a pair to the paths a server's configuration names — chosen from that list, never typed — at 644 and 600, then reloads it.\n\nRun `tui-cert --demo` for a sample machine with seven certificates in seven states.",
   "category": "certificates",
   "homepage": "https://github.com/tui-tools/tui-cert",
   "repo": "https://github.com/tui-tools/tui-cert",
@@ -64,6 +64,14 @@
     {
       "key": "s",
       "action": "Generate a certificate signing request the same way"
+    },
+    {
+      "key": "I",
+      "action": "Obtain a new certificate from an authority: webroot or standalone"
+    },
+    {
+      "key": "i",
+      "action": "Install the selected pair where a server config already names it"
     },
     {
       "key": "d",

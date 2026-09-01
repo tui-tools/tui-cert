@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tui-tools/tui-cert/internal/certs"
+	"github.com/tui-tools/tui-cert/internal/pki"
 	"github.com/tui-tools/tui-kit/theme"
 	"github.com/tui-tools/tui-kit/ui"
 )
@@ -21,6 +22,33 @@ const (
 	fieldKeyType = "keytype"
 	fieldDays    = "days"
 	fieldDir     = "dir"
+	// The obtain form's own fields.
+	fieldDomains = "domains"
+	fieldMethod  = "method"
+	fieldWebroot = "webroot"
+	fieldEmail   = "email"
+	fieldAgree   = "agree"
+)
+
+// formKind is what an open form is building, so the submit knows which builder
+// to call and the view knows what to call itself.
+type formKind int
+
+const (
+	// formCreate generates a self-signed certificate or a signing request with
+	// openssl. It is the zero value because a form that was never opened is
+	// never submitted: the mode decides that.
+	formCreate formKind = iota
+	// formObtain asks an ACME client for a certificate a public authority
+	// signs.
+	formObtain
+)
+
+// The two values the agreement toggle takes. It is a choice field rather than
+// a checkbox because a form of six rows should have six rows of the same shape.
+const (
+	agreeNo  = "no"
+	agreeYes = "yes"
 )
 
 // formField is one row of the form.
@@ -44,6 +72,7 @@ func (f formField) choice() bool { return len(f.options) > 0 }
 // no use for any of them, and every one would be another value to validate on
 // the way into an argv.
 type createForm struct {
+	kind   formKind
 	fields []formField
 	values map[string]string
 	active int
@@ -66,6 +95,7 @@ func newCreateForm(kind certs.CreateKind, caps certs.Capabilities,
 		days = 825
 	}
 	f := createForm{
+		kind:       formCreate,
 		defaultDir: caps.CreateDir,
 		values: map[string]string{
 			fieldKind:    string(kind),
@@ -103,11 +133,82 @@ func newCreateForm(kind certs.CreateKind, caps certs.Capabilities,
 	return f
 }
 
+// newObtainForm builds the guided request for a certificate a public authority
+// signs, seeded from the machine's own name.
+//
+// The client is not a field: it is the one whose row the reader was on, or the
+// only one installed, and a form that asked would be asking a question the
+// screen behind it has already answered.
+func newObtainForm(client, hostname, webroot string) createForm {
+	if webroot == "" {
+		webroot = DefaultWebroot
+	}
+	f := createForm{
+		kind: formObtain,
+		values: map[string]string{
+			fieldDomains: hostname,
+			fieldMethod:  string(certs.ObtainWebroot),
+			fieldWebroot: webroot,
+			fieldEmail:   "",
+			fieldAgree:   agreeNo,
+			// The client is carried in the values so the title and the request
+			// can both read it without a second field.
+			fieldKind: client,
+		},
+	}
+	f.fields = []formField{
+		{key: fieldDomains, label: "Domains",
+			help: "The names the certificate is for, space or comma separated. " +
+				"The first is what the client will call the certificate."},
+		{key: fieldMethod, label: "Method", options: ObtainMethods,
+			help: "webroot writes the challenge under a directory the server is " +
+				"already serving, and needs it running. standalone binds port 80 " +
+				"itself, and needs whatever is there stopped."},
+		{key: fieldWebroot, label: "Webroot",
+			help: "The document root the server already serves on port 80. The " +
+				"client writes into .well-known/acme-challenge under it."},
+		{key: fieldEmail, label: "Email",
+			help: "Where the authority sends the expiry warnings, and how it " +
+				"reaches the account. It is registered with the authority."},
+		{key: fieldAgree, label: "Agree", options: []string{agreeNo, agreeYes},
+			help: "The authority's subscriber agreement. Nothing is requested " +
+				"until this says yes: agreeing to somebody else's terms is not " +
+				"something a tool does on your behalf."},
+	}
+	f.input = textinput.New()
+	f.input.CharLimit = 300
+	f.input.Prompt = ""
+	f.focusActive()
+	return f
+}
+
+// ObtainMethods is the order the method field offers the two challenges in. It
+// is the backend's list, so the form cannot offer one the builder refuses.
+var ObtainMethods = pki.ObtainMethods
+
+// DefaultWebroot is where the form starts looking. It is the document root
+// every distribution's default server block ships with, which makes it right on
+// a machine nobody has changed and obviously wrong on one somebody has.
+const DefaultWebroot = "/var/www/html"
+
 // visible are the fields the form is showing. The validity field is dropped
 // for a signing request, because a request carries no validity: the authority
 // decides that, and offering the field would be offering a value that goes
-// nowhere.
+// nowhere. The webroot is dropped for a standalone challenge, which has none.
 func (f createForm) visible() []formField {
+	if f.kind == formObtain {
+		if f.values[fieldMethod] != string(certs.ObtainStandalone) {
+			return f.fields
+		}
+		var out []formField
+		for _, field := range f.fields {
+			if field.key == fieldWebroot {
+				continue
+			}
+			out = append(out, field)
+		}
+		return out
+	}
 	if f.values[fieldKind] == string(certs.CreateCSR) {
 		var out []formField
 		for _, field := range f.fields {
@@ -182,8 +283,8 @@ func (f *createForm) set(field, value string) {
 		return
 	}
 	f.values[field] = value
-	if field == fieldKind {
-		// Dropping the validity field can leave the cursor past the end.
+	if field == fieldKind || field == fieldMethod {
+		// Dropping a field can leave the cursor past the end.
 		f.active = min(f.active, len(f.visible())-1)
 	}
 	f.focusActive()
@@ -246,17 +347,51 @@ func (f *createForm) request() (certs.CreateRequest, error) {
 	return request, nil
 }
 
+// obtainRequest is what the obtain form collected. Only the parsing lives
+// here: what a name, a directory and an address may be is the backend's rule,
+// checked once, where the argv is built.
+func (f *createForm) obtainRequest() certs.ObtainRequest {
+	f.save()
+	request := certs.ObtainRequest{
+		Client:   f.values[fieldKind],
+		Method:   certs.ObtainMethod(f.values[fieldMethod]),
+		Webroot:  strings.TrimSpace(f.values[fieldWebroot]),
+		Email:    strings.TrimSpace(f.values[fieldEmail]),
+		AgreeTOS: f.values[fieldAgree] == agreeYes,
+	}
+	// Both separators are accepted because both are what somebody types.
+	request.Domains = strings.FieldsFunc(f.values[fieldDomains], func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t'
+	})
+	return request
+}
+
+// title names the form for its dialog.
+func (f createForm) title() string {
+	if f.kind == formObtain {
+		return "Obtain a certificate with " + f.values[fieldKind]
+	}
+	if f.values[fieldKind] == string(certs.CreateCSR) {
+		return "Generate a certificate signing request"
+	}
+	return "Generate a self-signed certificate"
+}
+
+// footnote is the one line under the form: what it will not do.
+func (f createForm) footnote() string {
+	if f.kind == formObtain {
+		return "Nothing is requested until the agreement says yes."
+	}
+	return "The private key never leaves this machine and is never shown."
+}
+
 // view renders the form as a dialog.
 func (f createForm) view(t theme.Theme, width, height int) string {
 	inner := min(max(width-8, 34), 76)
 	labelWidth := min(12, max(inner-16, 8))
 	valueWidth := max(inner-labelWidth-6, 10)
 
-	title := "Generate a self-signed certificate"
-	if f.values[fieldKind] == string(certs.CreateCSR) {
-		title = "Generate a certificate signing request"
-	}
-	lines := []string{t.Title.Render(title), ""}
+	lines := []string{t.Title.Render(ui.Truncate(f.title(), inner-4)), ""}
 
 	for i, field := range f.visible() {
 		label := t.Muted.Render(ui.Pad(ui.Truncate(field.label, labelWidth),
@@ -284,9 +419,7 @@ func (f createForm) view(t theme.Theme, width, height int) string {
 		lines = append(lines, "", t.Muted.Render(help))
 	}
 	lines = append(lines, "",
-		t.Muted.Render(ui.Truncate(
-			"The private key never leaves this machine and is never shown.",
-			inner-4)),
+		t.Muted.Render(ui.Truncate(f.footnote(), inner-4)),
 		"",
 		t.Key.Render("tab")+t.KeyDesc.Render(" next  ")+
 			t.Key.Render("←/→")+t.KeyDesc.Render(" change  ")+

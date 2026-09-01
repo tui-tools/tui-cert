@@ -189,6 +189,7 @@ func (f *Fake) rebuild() {
 				model.Hostname))
 	}
 	certs.SortEntries(model.Entries)
+	model.Destinations = Destinations(references)
 
 	model.ACME = []certs.ACME{{
 		Client:      BinCertbot,
@@ -399,6 +400,9 @@ func (f *Fake) Capabilities() certs.Capabilities {
 		KeyTypes:       KeyTypes,
 		DefaultDays:    DefaultDays,
 		SupportsLive:   true,
+		// The sample machine has `install` and `systemctl`, the way a machine
+		// running nginx does.
+		SupportsInstall: true,
 	}
 }
 
@@ -495,6 +499,12 @@ func (f *Fake) apply(cmd certs.Command) (string, error) {
 		return "Congratulations, all simulated renewals succeeded.", nil
 	case argv[0] == BinCertbot && contains(argv, "--force-renewal"):
 		return f.renew(argv)
+	case argv[0] == BinCertbot && argv[1] == "certonly":
+		return f.obtain(argv)
+	case argv[0] == "install" && len(argv) == 5 && argv[1] == "-m":
+		return f.installFile(argv)
+	case argv[0] == "systemctl" && argv[1] == "reload":
+		return "", nil
 	}
 	return "", nil
 }
@@ -551,6 +561,44 @@ func (f *Fake) renew(argv []string) (string, error) {
 	return "Congratulations, all renewals succeeded.", nil
 }
 
+// obtain issues the lineage a `certbot certonly` would have obtained, so the
+// demo's inventory grows the way a real one does.
+func (f *Fake) obtain(argv []string) (string, error) {
+	var names []string
+	for i, value := range argv {
+		if value == "-d" && i+1 < len(argv) {
+			names = append(names, argv[i+1])
+		}
+	}
+	if len(names) == 0 {
+		return "", fmt.Errorf("certbot: this command line names no domain")
+	}
+	dir := path.Join("/etc/letsencrypt/live", names[0])
+	f.issueTo(path.Join(dir, "fullchain.pem"), path.Join(dir, "privkey.pem"),
+		0o600, names, f.now().AddDate(0, 0, 90), f.issuer, f.issuerKey, true, true)
+	f.rebuild()
+	return "Successfully received certificate. Certificate is saved at " +
+		path.Join(dir, "fullchain.pem"), nil
+}
+
+// installFile copies one file on the sample machine, the way `install -m` does,
+// so the inventory afterwards shows what an installation really leaves behind.
+func (f *Fake) installFile(argv []string) (string, error) {
+	mode, source, destination := argv[2], argv[3], argv[4]
+	body, ok := f.files[source]
+	if !ok {
+		return "", fmt.Errorf("install: cannot stat '%s': No such file or directory",
+			source)
+	}
+	bits, err := parseOctalMode(mode)
+	if err != nil {
+		return "", err
+	}
+	f.write(demoFile{path: destination, mode: bits, body: body})
+	f.rebuild()
+	return "", nil
+}
+
 // domainsFor is the names a lineage covers, from what the client reported.
 func domainsFor(model certs.Model, name string) []string {
 	for _, client := range model.ACME {
@@ -591,6 +639,18 @@ func (f *Fake) BuildRenewDryRun(_ certs.Model, client string) (certs.Command, er
 // BuildRenew forces one of the sample certificates to be renewed.
 func (f *Fake) BuildRenew(_ certs.Model, client, name string) (certs.Command, error) {
 	return BuildRenew(client, name)
+}
+
+// BuildObtain renders the same command the real backend renders.
+func (f *Fake) BuildObtain(_ certs.Model, req certs.ObtainRequest) (
+	certs.Command, error) {
+	return BuildObtain(req)
+}
+
+// BuildInstall renders the same plan the real backend renders.
+func (f *Fake) BuildInstall(_ certs.Model, req certs.InstallRequest) (
+	certs.InstallPlan, error) {
+	return BuildInstall(req)
 }
 
 // BuildCreate renders the same plan the real backend renders.

@@ -61,6 +61,10 @@ const (
 	promptLive   = "live"
 )
 
+// pickerInstall is the one picker that is not filling a form field: it chooses
+// which server configuration's pair of paths a certificate is installed to.
+const pickerInstall = "\x00install"
+
 // app is the tui-cert Bubble Tea model.
 type app struct {
 	backend certs.Backend
@@ -101,6 +105,10 @@ type app struct {
 	// what an open text prompt is asking about.
 	pickerFor string
 	promptFor string
+	// installFrom is the certificate an open install picker will copy, and
+	// installTo the destinations it is choosing between, in the order shown.
+	installFrom certs.Entry
+	installTo   []certs.Destination
 
 	status     string
 	statusKind ui.StatusKind
@@ -395,13 +403,78 @@ func (a *app) handlePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	choice, accepted := a.picker.Selected(), a.picker.Accepted
-	field := a.pickerFor
+	cursor, field := a.picker.Cursor, a.pickerFor
 	a.picker, a.pickerFor = ui.Picker{}, ""
+
+	if field == pickerInstall {
+		a.mode = modeBrowse
+		if !accepted {
+			a.setStatus(ui.StatusInfo, "cancelled")
+			return a, nil
+		}
+		return a, a.confirmInstall(cursor)
+	}
+
 	if accepted {
 		a.form.set(field, choice)
 	}
 	a.mode = modeForm
 	return a, nil
+}
+
+// confirmInstall builds the plan for the chosen destination and opens the
+// confirm dialog on it.
+//
+// The choice is taken by index rather than by the label it rendered: two
+// destinations can share a certificate path with different keys, and matching
+// on the text a picker drew would be matching on a rendering.
+func (a *app) confirmInstall(index int) tea.Cmd {
+	if index < 0 || index >= len(a.installTo) {
+		a.setStatus(ui.StatusWarn, "that destination is not on this machine")
+		return nil
+	}
+	destination := a.installTo[index]
+	installed, err := a.backend.BuildInstall(a.model, certs.InstallRequest{
+		CertPath: a.installFrom.Path,
+		KeyPath:  a.installFrom.Key.Path,
+		To:       destination,
+		Reload:   destination.Reload != "",
+	})
+	if err != nil {
+		a.setStatus(ui.StatusWarn, err.Error())
+		return nil
+	}
+	title := "Install " + a.installFrom.Label() + " for " + destination.Server
+	a.mode = modeConfirm
+	a.confirm = ui.Confirm{
+		Title:   title,
+		Body:    installBody(a.installFrom, installed),
+		Command: a.previewAll(installed.Commands),
+		Danger:  true,
+		Payload: plan{title: title, commands: installed.Commands},
+	}
+	return nil
+}
+
+// installBody is what the confirm dialog says above the commands: which pair
+// moves where, what the scanner read it out of, and the caveat.
+func installBody(entry certs.Entry, installed certs.InstallPlan) string {
+	parts := []string{
+		"From:\n  " + entry.Path + "\n  " + entry.Key.Path,
+		"To:\n  " + installed.To.CertPath + "\n  " + installed.To.KeyPath,
+		"Read from " + installed.To.Reference.String() + ":\n  " +
+			installed.To.Reference.Text,
+	}
+	if entry.Key.MatchChecked && !entry.Key.Matches {
+		parts = append(parts, "The key beside this certificate is not this "+
+			"certificate's key. Installing the pair would give "+installed.To.Server+
+			" a certificate and a key that do not go together, and it will "+
+			"refuse to start with them.")
+	}
+	if installed.Warning != "" {
+		parts = append(parts, installed.Warning)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // handleForm routes keys to the create form.
@@ -447,6 +520,9 @@ func (a *app) handleForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // submitForm renders the generation plan and opens the confirm dialog with the
 // files it will write and the commands that write them.
 func (a *app) submitForm() tea.Cmd {
+	if a.form.kind == formObtain {
+		return a.submitObtain()
+	}
 	request, err := a.form.request()
 	if err != nil {
 		a.setStatus(ui.StatusError, err.Error())
@@ -467,6 +543,56 @@ func (a *app) submitForm() tea.Cmd {
 		Payload: plan{title: title, commands: create.Commands},
 	}
 	return nil
+}
+
+// submitObtain renders the obtain command and opens the confirm dialog with
+// what it will cost if it fails.
+//
+// A refusal leaves the form open, because every one of them is about one field
+// and closing it would throw away the other four.
+func (a *app) submitObtain() tea.Cmd {
+	request := a.form.obtainRequest()
+	if len(request.Domains) == 0 {
+		a.setStatus(ui.StatusError, "a certificate needs at least one domain name")
+		return nil
+	}
+	cmd, err := a.backend.BuildObtain(a.model, request)
+	if err != nil {
+		a.setStatus(ui.StatusError, err.Error())
+		return nil
+	}
+	title := "Obtain a certificate for " + request.Domains[0]
+	a.mode = modeConfirm
+	a.confirm = ui.Confirm{
+		Title:   title,
+		Body:    obtainBody(request) + "\n\n" + pki.ObtainWarning,
+		Command: a.backend.Preview(cmd),
+		Danger:  true,
+		Payload: plan{title: title, commands: []certs.Command{cmd}},
+	}
+	return nil
+}
+
+// obtainBody is what the confirm dialog says above the command: the names, and
+// what the chosen challenge needs from this machine.
+func obtainBody(request certs.ObtainRequest) string {
+	parts := []string{
+		"For:\n  " + strings.Join(request.Domains, "\n  "),
+		"The account is registered against " + request.Email + ", which is " +
+			"where the expiry warnings go.",
+	}
+	if request.Method == certs.ObtainStandalone {
+		parts = append(parts, "The standalone challenge binds port 80 itself. "+
+			"Anything already listening there — the web server this certificate "+
+			"is for, most likely — has to be stopped for the length of the "+
+			"exchange, and started again afterwards. Nothing here stops it.")
+	} else {
+		parts = append(parts, "The webroot challenge writes into "+
+			request.Webroot+"/.well-known/acme-challenge and needs the server "+
+			"to keep serving that path on port 80. If the directory is not the "+
+			"one being served, the authority reads a 404 and the request fails.")
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // createBody is what the confirm dialog says above the commands: what will
@@ -590,8 +716,107 @@ func (a *app) handleActionKey(msg tea.KeyMsg) tea.Cmd {
 		return a.confirmDryRun()
 	case "F":
 		return a.confirmRenew()
+	case "I":
+		return a.openObtain()
+	case "i":
+		return a.openInstallPicker()
 	}
 	return nil
+}
+
+// openObtain asks for a certificate this machine does not have yet.
+//
+// Everything on the renewal screen until now acted on a certificate a client
+// already manages: the rehearsal and the forced renewal both need a lineage to
+// name. Getting the first one meant leaving the tool.
+func (a *app) openObtain() tea.Cmd {
+	client, ok := a.selectedClient()
+	if !ok {
+		a.setStatus(ui.StatusWarn,
+			"neither certbot nor acme.sh is installed, so nothing here can ask "+
+				"an authority for a certificate")
+		return nil
+	}
+	a.form = newObtainForm(client, a.model.Hostname, a.webrootSuggestion())
+	a.mode = modeForm
+	return nil
+}
+
+// webrootSuggestion is the document root the obtain form starts on. There is no
+// way to know which directory a server block is really serving without parsing
+// three configuration languages, so the form starts on the distribution default
+// and says what the field is for.
+func (a *app) webrootSuggestion() string { return DefaultWebroot }
+
+// openInstallPicker asks which server's pair of paths the selected certificate
+// should be copied to.
+//
+// The destinations are the ones the scanner already read out of the server
+// configurations, and there is no field to type one into. That is the whole
+// design: a path on this list is a path a server is configured to read, so an
+// installation cannot land somewhere nothing will look.
+func (a *app) openInstallPicker() tea.Cmd {
+	entry, ok := a.selectedEntry()
+	if !ok {
+		a.setStatus(ui.StatusWarn,
+			"select a certificate on screen 1 to install it somewhere")
+		return nil
+	}
+	if !a.caps.SupportsInstall {
+		reason := a.caps.InstallReason
+		if reason == "" {
+			reason = "this backend cannot install a certificate"
+		}
+		a.setStatus(ui.StatusWarn, reason)
+		return nil
+	}
+	if entry.Unreadable != "" {
+		a.setStatusf(ui.StatusWarn,
+			"%s could not be read, so there is nothing here to install",
+			entry.Path)
+		return nil
+	}
+	if !entry.Key.Present || entry.Key.Path == "" {
+		a.setStatusf(ui.StatusWarn,
+			"no private key was found beside %s, and a server needs both halves",
+			entry.Path)
+		return nil
+	}
+
+	a.installTo = a.destinationsFor(entry)
+	if len(a.installTo) == 0 {
+		a.setStatus(ui.StatusWarn,
+			"no nginx or Apache configuration on this machine names a pair of "+
+				"paths to install to — screen 4 lists what was searched")
+		return nil
+	}
+	options := make([]string, 0, len(a.installTo))
+	for _, destination := range a.installTo {
+		options = append(options, destination.Label())
+	}
+	a.installFrom = entry
+	a.pickerFor = pickerInstall
+	a.picker = ui.NewPicker("Install "+entry.Label()+" where", options, "")
+	a.mode = modePicker
+	return nil
+}
+
+// destinationsFor is the destinations worth offering for one certificate: every
+// pair a server names, minus the one this certificate already is.
+//
+// Installing a file over itself is not a smaller version of installing it
+// somewhere: `install a a` truncates the file before it reads it, so the
+// harmless-looking choice is the one that loses the certificate. It is left off
+// the list rather than refused after the fact.
+func (a *app) destinationsFor(entry certs.Entry) []certs.Destination {
+	var out []certs.Destination
+	for _, destination := range a.model.Destinations {
+		if destination.CertPath == entry.Path || destination.KeyPath == entry.Key.Path {
+			continue
+		}
+		out = append(out, destination)
+	}
+	return out
 }
 
 // checkSelected opens one connection to the name on the certificate under the
