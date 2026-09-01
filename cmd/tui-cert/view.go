@@ -745,6 +745,7 @@ func (a *app) shortHelpKeys() []ui.KeyHint {
 	switch a.screen {
 	case screenACME:
 		hints = append(hints,
+			ui.KeyHint{Key: "I", Desc: "obtain"},
 			ui.KeyHint{Key: "d", Desc: "rehearse"},
 			ui.KeyHint{Key: "F", Desc: "renew now"})
 	case screenLive:
@@ -757,7 +758,8 @@ func (a *app) shortHelpKeys() []ui.KeyHint {
 		hints = append(hints,
 			ui.KeyHint{Key: "c", Desc: "live check"},
 			ui.KeyHint{Key: "C", Desc: "another host"},
-			ui.KeyHint{Key: "n", Desc: "generate"})
+			ui.KeyHint{Key: "n", Desc: "generate"},
+			ui.KeyHint{Key: "i", Desc: "install"})
 	}
 	return append(hints,
 		ui.KeyHint{Key: "/", Desc: "filter"},
@@ -779,6 +781,8 @@ func helpKeys() []ui.KeyHint {
 		{Key: "C", Desc: "the same, against a host you type"},
 		{Key: "n", Desc: "generate a self-signed certificate"},
 		{Key: "s", Desc: "generate a certificate signing request"},
+		{Key: "I", Desc: "obtain a new certificate from an authority (webroot or standalone)"},
+		{Key: "i", Desc: "install the selected pair to a path a server config already names"},
 		{Key: "d", Desc: "rehearse every renewal, writing nothing"},
 		{Key: "F", Desc: "renew the selected certificate now"},
 		{Key: "R", Desc: "re-read this machine"},

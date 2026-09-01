@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tui-tools/tui-cert/internal/certs"
 )
 
 // The parsers in this package are where bytes this tool did not write become
@@ -259,6 +261,90 @@ func FuzzSplitTarget(f *testing.F) {
 		}
 		if host == "" || port == "" {
 			t.Fatalf("returned %q, which is missing a half", target)
+		}
+	})
+}
+
+// FuzzBuildObtain explores the builder whose input comes from a keyboard rather
+// than from a file this machine already has. The property is the promise the
+// preview makes: either the value is refused with a reason, or the argv it
+// produced carries nothing that could turn one command into two.
+func FuzzBuildObtain(f *testing.F) {
+	f.Add("a.example.com b.example.com", "webroot", "/srv/www", "ops@example.com", true)
+	f.Add("", "", "", "", false)
+	f.Add("-x", "standalone", "", "-m", true)
+	f.Add("a.example.com", "webroot", "/srv/../etc", "a@b.c", true)
+	f.Fuzz(func(t *testing.T, domains, method, webroot, email string, agree bool) {
+		cmd, err := BuildObtain(certs.ObtainRequest{
+			Client:   BinCertbot,
+			Domains:  strings.Fields(domains),
+			Method:   certs.ObtainMethod(method),
+			Webroot:  webroot,
+			Email:    email,
+			AgreeTOS: agree,
+		})
+		if err != nil {
+			if len(cmd.Argv) != 0 {
+				t.Fatalf("a refused request still built %v", cmd.Argv)
+			}
+			return
+		}
+		for _, arg := range cmd.Argv {
+			if strings.ContainsAny(arg, "\n\r\x00 ") {
+				t.Fatalf("argv carries whitespace or a control character: %q", arg)
+			}
+			if strings.ContainsAny(arg, "$`;&|<>") {
+				t.Fatalf("argv carries a shell metacharacter: %q", arg)
+			}
+		}
+		// Every value that came from the form follows a flag, so nothing typed
+		// can be read by the client as an option of its own.
+		for i, arg := range cmd.Argv {
+			if i == 0 || strings.HasPrefix(arg, "-") {
+				continue
+			}
+			if i == 1 && arg == "certonly" {
+				continue
+			}
+			if !strings.HasPrefix(cmd.Argv[i-1], "-") {
+				t.Fatalf("%q at %d follows no flag: %v", arg, i, cmd.Argv)
+			}
+		}
+	})
+}
+
+// FuzzBuildInstall is the same property for the four paths an installation
+// carries, none of which may be relative, escape itself, or be its own source.
+func FuzzBuildInstall(f *testing.F) {
+	f.Add("/a.pem", "/a.key", "/b.pem", "/b.key", "nginx", true)
+	f.Add("", "", "", "", "", false)
+	f.Add("/a.pem", "/a.key", "/a.pem", "/a.key", "nginx", true)
+	f.Add("../a", "/a.key", "/b.pem", "/b.key", "-x", true)
+	f.Fuzz(func(t *testing.T, cert, key, toCert, toKey, unit string, reload bool) {
+		plan, err := BuildInstall(certs.InstallRequest{
+			CertPath: cert,
+			KeyPath:  key,
+			To: certs.Destination{Server: ServerNginx, CertPath: toCert,
+				KeyPath: toKey, Reload: unit},
+			Reload: reload,
+		})
+		if err != nil {
+			if len(plan.Commands) != 0 {
+				t.Fatalf("a refused install still built %d commands",
+					len(plan.Commands))
+			}
+			return
+		}
+		if plan.Commands[0].Argv[3] == plan.Commands[0].Argv[4] {
+			t.Fatalf("a file is being installed over itself: %v",
+				plan.Commands[0].Argv)
+		}
+		for _, cmd := range plan.Commands {
+			for _, arg := range cmd.Argv {
+				if strings.ContainsAny(arg, "\n\r\x00 ") {
+					t.Fatalf("argv carries whitespace or a control character: %q", arg)
+				}
+			}
 		}
 	})
 }

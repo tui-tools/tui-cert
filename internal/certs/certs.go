@@ -225,6 +225,33 @@ func (r Reference) String() string {
 	return r.File + ":" + strconv.Itoa(r.Line)
 }
 
+// Destination is a certificate-and-key pair a server's configuration names: the
+// two paths that server will read at its next reload.
+//
+// It is the other half of a Reference. A Reference says "this file is served";
+// a Destination says "these are the two paths to put a pair at for this server
+// to serve it", which is what makes installing one a choice from a list rather
+// than a path typed from memory.
+type Destination struct {
+	// Server is "nginx" or "apache".
+	Server string
+	// CertPath and KeyPath are the two files the configuration names.
+	CertPath string
+	KeyPath  string
+	// Reference is the configuration line the pair was read from, so the dialog
+	// can say where the destination came from.
+	Reference Reference
+	// Reload is the systemd unit that makes the server read the pair again —
+	// "nginx", "httpd", "apache2" — read from where the configuration was found
+	// rather than assumed, because the same server has two names.
+	Reload string
+}
+
+// Label names a destination for the picker.
+func (d Destination) Label() string {
+	return d.Server + ": " + d.CertPath + " + " + d.KeyPath
+}
+
 // The sources an entry can have been found through.
 const (
 	SourceLetsEncrypt = "letsencrypt"
@@ -417,6 +444,9 @@ type Model struct {
 	Tools []Tool `json:"tools,omitempty"`
 	// Locations are the places that were searched.
 	Locations []Location `json:"locations,omitempty"`
+	// Destinations are the certificate-and-key pairs the server configurations
+	// name, which are the only paths this tool will install a pair to.
+	Destinations []Destination `json:"destinations,omitempty"`
 	// Caddy is where Caddy keeps the certificates it manages itself, empty
 	// when no such storage was found. It is read-only: Caddy renews on its
 	// own and there is nothing here for another tool to do.
@@ -571,6 +601,11 @@ type Capabilities struct {
 	DefaultDays int
 	// SupportsLive reports that a live TLS check can be made.
 	SupportsLive bool
+	// SupportsInstall reports that a certificate and its key can be copied to
+	// the paths a server's configuration names, which needs `install`.
+	SupportsInstall bool
+	// InstallReason explains a false SupportsInstall in the user's terms.
+	InstallReason string
 }
 
 // CanRenew reports whether any client can be asked to renew.
@@ -624,6 +659,68 @@ type CreatePlan struct {
 	Commands []Command
 }
 
+// ObtainMethod is how an ACME client proves this machine controls a name.
+type ObtainMethod string
+
+// The two challenge methods tui-cert offers.
+//
+// They are the two that need nothing but this machine. A DNS challenge needs
+// credentials for whoever runs the zone, and a form that asked for those would
+// be a form asking for an API token — which this tool does not take.
+const (
+	// ObtainWebroot writes the challenge file under a directory a server is
+	// already serving, and needs that server to keep running.
+	ObtainWebroot ObtainMethod = "webroot"
+	// ObtainStandalone binds port 80 itself, and needs whatever is on port 80
+	// to be stopped for the length of the exchange.
+	ObtainStandalone ObtainMethod = "standalone"
+)
+
+// ObtainRequest is what the obtain form collected: a certificate this machine
+// does not have yet.
+type ObtainRequest struct {
+	// Client is "certbot" or "acme.sh".
+	Client string
+	// Domains are the names the certificate is for, already split. The first is
+	// the one the client names the certificate by.
+	Domains []string
+	// Method is which challenge to use.
+	Method ObtainMethod
+	// Webroot is the directory the challenge file is written under, required
+	// for ObtainWebroot and ignored otherwise.
+	Webroot string
+	// Email is the address the authority uses for expiry warnings and for
+	// reaching the account.
+	Email string
+	// AgreeTOS records that the subscriber agreement was accepted. It is a
+	// field rather than an always-true constant because agreeing to somebody
+	// else's terms is not something a tool does on a user's behalf.
+	AgreeTOS bool
+}
+
+// InstallRequest is one certificate-and-key pair about to be copied to the
+// paths a server's configuration names.
+type InstallRequest struct {
+	// CertPath and KeyPath are the pair as it is now.
+	CertPath string
+	KeyPath  string
+	// To is the destination, chosen from Model.Destinations.
+	To Destination
+	// Reload asks for the server to be told to read the pair again.
+	Reload bool
+}
+
+// InstallPlan is an installation the user is about to run: what it overwrites,
+// and the exact commands that do it.
+type InstallPlan struct {
+	// To is the destination the plan was built for.
+	To Destination
+	// Warning is the caveat the confirm dialog must show.
+	Warning string
+	// Commands are run in order, and are what the confirm dialog shows.
+	Commands []Command
+}
+
 // Backend is the boundary between the UI and the machine. Load reads state;
 // Probe makes the one network connection this tool ever makes; the Build*
 // methods turn user intent into previewable Commands; Run executes a Command
@@ -657,4 +754,12 @@ type Backend interface {
 	// BuildCreate renders the commands that generate a self-signed
 	// certificate or a CSR.
 	BuildCreate(model Model, req CreateRequest) (CreatePlan, error)
+	// BuildObtain asks a client for a certificate this machine does not have
+	// yet. It is the one command here that creates an account with a
+	// certificate authority, which is why the agreement is a field.
+	BuildObtain(model Model, req ObtainRequest) (Command, error)
+	// BuildInstall copies a certificate and its key to the paths a server's
+	// configuration already names, and optionally tells the server to read
+	// them again.
+	BuildInstall(model Model, req InstallRequest) (InstallPlan, error)
 }

@@ -356,6 +356,63 @@ The destination is `/etc/ssl/tui-cert` when running as root and
 `~/.local/share/tui-cert` when not, so an ordinary user is never handed a plan
 that fails on its first command.
 
+## Getting one, and putting it where the server looks
+
+`I` on the renewal screen asks an ACME client for a certificate this machine
+does not have yet. Everything else on that screen acted on a lineage a client
+already manages — the rehearsal and the forced renewal both need one to name —
+so getting the first certificate meant leaving the tool.
+
+The form is five fields, and two of them are the whole design:
+
+```
+certbot certonly --non-interactive --agree-tos -m ops@example.com \
+  --webroot -w /srv/www -d shop.example.com -d www.shop.example.com
+```
+
+**The agreement is a field, and it starts on `no`.** Nothing is requested until
+it says yes: agreeing to somebody else's subscriber agreement is not something a
+tool does on your behalf.
+
+**The method is a choice, because the two have opposite requirements.**
+`webroot` writes the challenge under a directory the server is already serving
+and needs it to keep running; `standalone` binds port 80 itself and needs
+whatever is there to be stopped. The dialog says which, before you answer. A
+failure costs a rate limit — Let's Encrypt allows five per account, per
+hostname, per hour — so the two mistakes worth making slowly are made in a form.
+
+Every value is checked where the argv is built: a name that would be read as a
+flag, an IP address no authority will issue for, a relative webroot. A refusal
+leaves the form open, because it is about one field.
+
+`i` on a certificate is the other half. It copies the pair to the paths a
+server's own configuration names:
+
+```
+install -m 644 /etc/letsencrypt/live/shop.example.com/fullchain.pem \
+  /etc/ssl/private/shop.example.com.pem
+install -m 600 /etc/letsencrypt/live/shop.example.com/privkey.pem \
+  /etc/ssl/private/shop.example.com.key
+systemctl reload nginx
+```
+
+**The destination is chosen from a list, never typed.** The paths on it are the
+ones the scanner already read out of `/etc/nginx` and `/etc/apache2` — a path on
+that list is a path a server is configured to read, so an installation cannot
+land somewhere nothing will look. Caddy is not on it: it obtains and renews its
+own certificates, and a second tool writing into that storage is how a working
+setup breaks.
+
+Both files are copied with `install`, which sets the mode in the same call that
+writes the file. A private key that exists for a moment at whatever the umask
+allows is the finding this tool was written to report.
+
+A destination that is its own source is never offered and is refused if it
+arrives anyway: `install a a` truncates the file before it reads it, so the
+choice that looks like a no-op is the one that loses the certificate. And if the
+key beside the certificate is not that certificate's key, the dialog says so
+before you answer — the server would refuse to start with the pair.
+
 ## Usage
 
 ```sh
@@ -451,9 +508,12 @@ Every one of these is previewed and confirmed first.
 | `d` | `certbot renew --dry-run` |
 | `F` | `certbot renew --cert-name <name> --force-renewal`, or `acme.sh --renew -d <name> --force` |
 | `n` / `s` | `install -d -m 700 <dir>`, then `openssl req …`, then `chmod 600 <dir>/<name>.key` |
+| `I` | `certbot certonly --non-interactive --agree-tos -m <email> --webroot -w <dir> -d …`, or `--standalone -d …`; `acme.sh --issue --accountemail <email> …` for that client |
+| `i` | `install -m 644 <crt> <dst>`, `install -m 600 <key> <dst>`, then `systemctl reload nginx` or `httpd` |
 
-Nothing else. There is no other code path that writes a file, and the only
-directory written to is the one the form showed you.
+Nothing else. There is no other code path that writes a file, and every path
+written to was either shown by the form or read out of a server's own
+configuration.
 
 ## Keys
 
@@ -470,6 +530,8 @@ directory written to is the one the form showed you.
 | `C` | The same, against a host you type |
 | `n` | Generate a self-signed certificate |
 | `s` | Generate a certificate signing request |
+| `I` | Obtain a certificate from an authority: webroot or standalone |
+| `i` | Install the selected pair where a server configuration already names it |
 | `d` | Rehearse every renewal, writing nothing |
 | `F` | Renew the selected certificate now |
 | `R` | Re-read this machine |
@@ -504,6 +566,11 @@ In the **generator**: `tab` moves between fields, `←`/`→` cycles a choice,
   disk.
 - Generate a self-signed certificate or a signing request, previewed as three
   commands, with the key left at mode 600.
+- Obtain a certificate this machine does not have yet, with certbot or acme.sh,
+  by the webroot or the standalone challenge — and request nothing at all until
+  the subscriber agreement has been accepted in the form.
+- Install a certificate and its key to the paths an nginx or Apache
+  configuration already names, at 644 and 600, and reload that server.
 - Follow the active Omarchy theme, and respect `NO_COLOR`.
 
 ## What v0.1 cannot do
@@ -513,9 +580,13 @@ In the **generator**: `tab` moves between fields, `←`/`→` cycles a choice,
 - **No revocation check.** The OCSP and CRL endpoints are shown; nothing is
   fetched from them. A live check reports whether a response was *stapled*,
   which is a fact about the handshake rather than a query.
-- **No ACME account management**, no issuing a real certificate, no DNS
-  challenge. Getting a certificate is certbot's job; this shows you what
-  happened.
+- **No DNS challenge.** It needs credentials for whoever runs the zone, and a
+  form that asked for those would be a form asking for an API token. `I` offers
+  the two challenges that need nothing but this machine.
+- **No ACME account management** beyond registering the address `I` was given:
+  no key rollover, no deactivation, no changing the contact afterwards.
+- **No destination you type.** `i` installs only to a pair of paths the scanner
+  read out of a server configuration, and never over the file it is copying.
 - **No Caddy management.** Its storage is reported, read-only.
 - **No Java keystores, no PKCS#12, no NSS databases.** PEM and DER only.
 - **No `Include` following in server configurations.** The directives are read

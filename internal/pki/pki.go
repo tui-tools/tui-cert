@@ -191,6 +191,13 @@ func (r *Real) Capabilities() certs.Capabilities {
 	if r.acmesh != nil {
 		caps.RenewClients = append(caps.RenewClients, BinAcmeSh)
 	}
+	if r.install == nil {
+		caps.InstallReason = "`install` is not on this machine, and it is what " +
+			"copies a file and sets its mode in the same call — which is the " +
+			"whole reason a private key is not written with anything else"
+	} else {
+		caps.SupportsInstall = true
+	}
 	switch {
 	case r.openssl == nil:
 		caps.CreateReason = "openssl is not installed, so there is nothing here " +
@@ -417,6 +424,7 @@ func (r *Real) Load(ctx context.Context) (certs.Model, error) {
 				model.Hostname))
 	}
 	certs.SortEntries(model.Entries)
+	model.Destinations = Destinations(references)
 
 	model.ACME = r.loadACME(ctx)
 	model.Tools = r.loadTools(ctx)
@@ -615,6 +623,31 @@ func (r *Real) BuildCreate(_ certs.Model,
 		req.Dir = caps.CreateDir
 	}
 	return BuildCreate(req, r.existingFile(req))
+}
+
+// BuildObtain asks a client for a certificate this machine does not have yet.
+func (r *Real) BuildObtain(_ certs.Model, req certs.ObtainRequest) (
+	certs.Command, error) {
+	if err := r.haveClient(req.Client); err != nil {
+		return certs.Command{}, err
+	}
+	return BuildObtain(req)
+}
+
+// BuildInstall copies a certificate and its key to the paths a server's
+// configuration already names.
+func (r *Real) BuildInstall(_ certs.Model, req certs.InstallRequest) (
+	certs.InstallPlan, error) {
+	caps := r.Capabilities()
+	if !caps.SupportsInstall {
+		return certs.InstallPlan{}, fmt.Errorf("%s", caps.InstallReason)
+	}
+	if req.Reload && r.systemctl == nil {
+		return certs.InstallPlan{}, fmt.Errorf(
+			"systemctl is not on this machine, so the reload cannot be run from " +
+				"here; install the pair without it and reload the server yourself")
+	}
+	return BuildInstall(req)
 }
 
 // existingFile names a file the plan would overwrite, empty when it would

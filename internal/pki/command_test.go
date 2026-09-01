@@ -233,3 +233,173 @@ func TestSANValueAlwaysCarriesTheCommonName(t *testing.T) {
 		t.Errorf("an invalid extra name was accepted")
 	}
 }
+
+// TestBuildObtainRendersBothClients: the two ACME clients spell the same
+// request differently, and the tool renders each in its own words rather than
+// mapping one onto the other.
+func TestBuildObtainRendersBothClients(t *testing.T) {
+	base := certs.ObtainRequest{
+		Domains:  []string{"a.example.com", "b.example.com"},
+		Method:   certs.ObtainWebroot,
+		Webroot:  "/srv/www",
+		Email:    "ops@example.com",
+		AgreeTOS: true,
+	}
+
+	certbot := base
+	certbot.Client = BinCertbot
+	cmd, err := BuildObtain(certbot)
+	if err != nil {
+		t.Fatalf("BuildObtain(certbot): %v", err)
+	}
+	want := "certbot certonly --non-interactive --agree-tos -m ops@example.com " +
+		"--webroot -w /srv/www -d a.example.com -d b.example.com"
+	if got := cmd.String(); got != want {
+		t.Errorf("certbot = %q\nwant    = %q", got, want)
+	}
+
+	acme := base
+	acme.Client = BinAcmeSh
+	acme.Method = certs.ObtainStandalone
+	cmd, err = BuildObtain(acme)
+	if err != nil {
+		t.Fatalf("BuildObtain(acme.sh): %v", err)
+	}
+	want = "acme.sh --issue --accountemail ops@example.com --standalone " +
+		"-d a.example.com -d b.example.com"
+	if got := cmd.String(); got != want {
+		t.Errorf("acme.sh = %q\nwant    = %q", got, want)
+	}
+}
+
+// TestBuildObtainRefusals: every one of these would cost several minutes and a
+// rate limit to discover from the authority instead.
+func TestBuildObtainRefusals(t *testing.T) {
+	ok := certs.ObtainRequest{
+		Client: BinCertbot, Domains: []string{"a.example.com"},
+		Method: certs.ObtainWebroot, Webroot: "/srv/www",
+		Email: "ops@example.com", AgreeTOS: true,
+	}
+	cases := []struct {
+		what   string
+		mutate func(*certs.ObtainRequest)
+	}{
+		{"no agreement", func(r *certs.ObtainRequest) { r.AgreeTOS = false }},
+		{"no email", func(r *certs.ObtainRequest) { r.Email = "" }},
+		{"an email that starts a flag", func(r *certs.ObtainRequest) { r.Email = "-m" }},
+		{"no domains", func(r *certs.ObtainRequest) { r.Domains = nil }},
+		{"an IP address", func(r *certs.ObtainRequest) { r.Domains = []string{"192.0.2.1"} }},
+		{"a relative webroot", func(r *certs.ObtainRequest) { r.Webroot = "www" }},
+		{"a webroot that escapes", func(r *certs.ObtainRequest) { r.Webroot = "/srv/../etc" }},
+		{"an unknown method", func(r *certs.ObtainRequest) { r.Method = "dns" }},
+		{"an unknown client", func(r *certs.ObtainRequest) { r.Client = "lego" }},
+	}
+	for _, c := range cases {
+		t.Run(c.what, func(t *testing.T) {
+			request := ok
+			c.mutate(&request)
+			cmd, err := BuildObtain(request)
+			if err == nil {
+				t.Fatalf("%s was accepted, and built %v", c.what, cmd.Argv)
+			}
+			if len(cmd.Argv) != 0 {
+				t.Errorf("a refused request still built %v", cmd.Argv)
+			}
+		})
+	}
+}
+
+// TestBuildInstallSetsBothModesAndReloads: the mode is set by the command that
+// writes the file, so a private key never exists for a moment at whatever the
+// umask allows.
+func TestBuildInstallSetsBothModesAndReloads(t *testing.T) {
+	request := certs.InstallRequest{
+		CertPath: "/etc/letsencrypt/live/a.example.com/fullchain.pem",
+		KeyPath:  "/etc/letsencrypt/live/a.example.com/privkey.pem",
+		To: certs.Destination{
+			Server:   ServerNginx,
+			CertPath: "/etc/ssl/private/a.example.com.pem",
+			KeyPath:  "/etc/ssl/private/a.example.com.key",
+			Reload:   "nginx",
+		},
+		Reload: true,
+	}
+	plan, err := BuildInstall(request)
+	if err != nil {
+		t.Fatalf("BuildInstall: %v", err)
+	}
+	want := []string{
+		"install -m 644 /etc/letsencrypt/live/a.example.com/fullchain.pem " +
+			"/etc/ssl/private/a.example.com.pem",
+		"install -m 600 /etc/letsencrypt/live/a.example.com/privkey.pem " +
+			"/etc/ssl/private/a.example.com.key",
+		"systemctl reload nginx",
+	}
+	if len(plan.Commands) != len(want) {
+		t.Fatalf("built %d commands, want %d", len(plan.Commands), len(want))
+	}
+	for i, line := range want {
+		if got := plan.Commands[i].String(); got != line {
+			t.Errorf("command %d = %q, want %q", i+1, got, line)
+		}
+	}
+	if plan.Warning == "" {
+		t.Error("an installation that overwrites two files carries no warning")
+	}
+
+	// Without the reload, the plan says so rather than leaving the reader to
+	// wonder why the served certificate did not change.
+	request.Reload = false
+	plan, err = BuildInstall(request)
+	if err != nil {
+		t.Fatalf("BuildInstall without a reload: %v", err)
+	}
+	if len(plan.Commands) != 2 {
+		t.Errorf("built %d commands without a reload, want 2", len(plan.Commands))
+	}
+	if !strings.Contains(plan.Warning, "sits on disk") {
+		t.Errorf("the warning does not say the pair is not being served: %q",
+			plan.Warning)
+	}
+}
+
+// TestDestinationsAreOnlyWhatAServerNames: Caddy owns its own certificates,
+// half a pair is not a destination, and the order does not depend on how Go
+// walked a map.
+func TestDestinationsAreOnlyWhatAServerNames(t *testing.T) {
+	references := map[string][]ConfigRef{
+		"/etc/ssl/b.pem": {{
+			CertPath: "/etc/ssl/b.pem", KeyPath: "/etc/ssl/b.key",
+			Reference: certs.Reference{Server: ServerNginx,
+				File: "/etc/nginx/conf.d/b.conf"},
+		}},
+		"/etc/ssl/a.pem": {{
+			CertPath: "/etc/ssl/a.pem", KeyPath: "/etc/ssl/a.key",
+			Reference: certs.Reference{Server: ServerApache,
+				File: "/etc/apache2/sites-enabled/a.conf"},
+		}},
+		"/etc/ssl/c.pem": {{
+			CertPath: "/etc/ssl/c.pem", KeyPath: "/etc/ssl/c.key",
+			Reference: certs.Reference{Server: ServerCaddy, File: "/etc/caddy/Caddyfile"},
+		}},
+		"/etc/ssl/d.pem": {{
+			CertPath:  "/etc/ssl/d.pem",
+			Reference: certs.Reference{Server: ServerNginx, File: "/etc/nginx/d.conf"},
+		}},
+	}
+	got := Destinations(references)
+	if len(got) != 2 {
+		t.Fatalf("got %d destinations, want 2: %+v", len(got), got)
+	}
+	if got[0].CertPath != "/etc/ssl/a.pem" || got[1].CertPath != "/etc/ssl/b.pem" {
+		t.Errorf("destinations are not in path order: %+v", got)
+	}
+	// Debian calls the same server apache2, and the unit is named after the
+	// package rather than after the daemon.
+	if got[0].Reload != "apache2" {
+		t.Errorf("the Debian Apache reloads %q", got[0].Reload)
+	}
+	if got[1].Reload != "nginx" {
+		t.Errorf("nginx reloads %q", got[1].Reload)
+	}
+}

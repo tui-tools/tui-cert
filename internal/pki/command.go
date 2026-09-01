@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -192,9 +193,19 @@ func FileStem(commonName string) string {
 	return stem
 }
 
+// NormalizeDir is the one way a directory typed into a form is trimmed.
+//
+// It exists because checking one string and using another is a hole rather than
+// a tidiness question: `/srv/www /` trimmed of its trailing slash is
+// `/srv/www ` — a different path, with a space in it, that the pattern below
+// would never have accepted. Every caller checks and uses this value.
+func NormalizeDir(dir string) string {
+	return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(dir), "/"))
+}
+
 // CheckDir validates a destination directory.
 func CheckDir(dir string) error {
-	dir = strings.TrimRight(strings.TrimSpace(dir), "/")
+	dir = NormalizeDir(dir)
 	if !dirRe.MatchString(dir) {
 		return fmt.Errorf("pki: %q is not an absolute path tui-cert will write to",
 			dir)
@@ -238,7 +249,7 @@ func BuildCreate(req certs.CreateRequest, existing string) (certs.CreatePlan, er
 	if err := CheckDir(req.Dir); err != nil {
 		return certs.CreatePlan{}, err
 	}
-	dir := strings.TrimRight(strings.TrimSpace(req.Dir), "/")
+	dir := NormalizeDir(req.Dir)
 
 	subject, err := SubjectFor(req.CommonName)
 	if err != nil {
@@ -380,6 +391,308 @@ func BuildRenew(client, name string) (certs.Command, error) {
 		return certs.Command{}, fmt.Errorf(
 			"pki: %q is not a certificate client tui-cert drives", client)
 	}
+}
+
+// emailRe bounds the account address an ACME client registers with. It is
+// deliberately narrow: this is a value going into an argv, not a mailbox being
+// validated, and a value starting with a `-` would be read by both clients as
+// another option.
+var emailRe = regexp.MustCompile(
+	`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?` +
+		`(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$`)
+
+// filePathRe accepts an absolute path to a file this tool will read or write.
+var filePathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,255}$`)
+
+// MaxDomains bounds one certificate. Let's Encrypt allows a hundred names on
+// one certificate, and a form that let somebody paste a thousand would build a
+// command line no shell would take.
+const MaxDomains = 100
+
+// ObtainMethods is the order the obtain form offers the two challenges in.
+var ObtainMethods = []string{
+	string(certs.ObtainWebroot), string(certs.ObtainStandalone),
+}
+
+// CheckFilePath validates a path this tool will read from or write to.
+//
+// The value is matched as it is, not trimmed first. A path is used exactly as
+// it was given — these come from the scan of a server's own configuration — so
+// checking a trimmed copy and then using the original would be checking a
+// different string from the one that reaches the argv.
+func CheckFilePath(kind, path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("pki: there is no %s path", kind)
+	}
+	if !filePathRe.MatchString(path) {
+		return fmt.Errorf("pki: %q is not an absolute path for a %s", path, kind)
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("pki: %q walks out of itself with a `..`", path)
+	}
+	return nil
+}
+
+// domainArgs renders the `-d` pairs of an obtain, checking each name.
+func domainArgs(domains []string) ([]string, error) {
+	var argv []string
+	seen := map[string]bool{}
+	for _, domain := range domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" || seen[domain] {
+			continue
+		}
+		if err := CheckName(domain); err != nil {
+			return nil, err
+		}
+		// An IP address cannot be on a publicly trusted certificate from either
+		// authority these clients talk to, and asking for one is a failure
+		// several minutes and one rate limit later.
+		if IsIP(domain) {
+			return nil, fmt.Errorf(
+				"%s is an IP address, and no ACME authority these clients talk "+
+					"to will issue for one — a certificate for an address is a "+
+					"self-signed one, which n generates", domain)
+		}
+		seen[domain] = true
+		argv = append(argv, "-d", domain)
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("a certificate needs at least one domain name")
+	}
+	if len(argv)/2 > MaxDomains {
+		return nil, fmt.Errorf(
+			"pki: %d names is more than the %d an authority will put on one "+
+				"certificate", len(argv)/2, MaxDomains)
+	}
+	return argv, nil
+}
+
+// BuildObtain asks a client for a certificate this machine does not have yet.
+//
+// It is the one command in this tool that creates something with a certificate
+// authority rather than refreshing something that already exists, and the two
+// things that makes different are both visible in the form: the subscriber
+// agreement is a field, because agreeing to somebody else's terms is not
+// something a tool does on a user's behalf, and the challenge method is a
+// choice, because the two have opposite requirements — webroot needs the server
+// to keep running, standalone needs it to be stopped.
+//
+// There is no DNS challenge. It needs credentials for whoever runs the zone,
+// and a form that asked for those would be a form asking for an API token.
+func BuildObtain(req certs.ObtainRequest) (certs.Command, error) {
+	if !req.AgreeTOS {
+		return certs.Command{}, fmt.Errorf(
+			"the authority's subscriber agreement has to be accepted before it " +
+				"will issue anything; set \"Agree\" to yes")
+	}
+	email := strings.TrimSpace(req.Email)
+	if !emailRe.MatchString(email) {
+		return certs.Command{}, fmt.Errorf(
+			"%q is not an address the authority can reach you at, and it is what "+
+				"the expiry warnings go to", req.Email)
+	}
+	domains, err := domainArgs(req.Domains)
+	if err != nil {
+		return certs.Command{}, err
+	}
+
+	var method []string
+	switch req.Method {
+	case certs.ObtainWebroot:
+		webroot := NormalizeDir(req.Webroot)
+		if err := CheckDir(webroot); err != nil {
+			return certs.Command{}, err
+		}
+		method = []string{"--webroot", "-w", webroot}
+		if req.Client == BinAcmeSh {
+			method = []string{"-w", webroot}
+		}
+	case certs.ObtainStandalone:
+		method = []string{"--standalone"}
+	default:
+		return certs.Command{}, fmt.Errorf(
+			"pki: %q is not a challenge tui-cert offers", req.Method)
+	}
+
+	name := strings.TrimSpace(req.Domains[0])
+	switch req.Client {
+	case BinCertbot:
+		argv := []string{BinCertbot, "certonly", "--non-interactive",
+			"--agree-tos", "-m", email}
+		argv = append(argv, method...)
+		return certs.Command{
+			Argv:        append(argv, domains...),
+			Description: "Obtain a certificate for " + name + " with certbot",
+			Destructive: true,
+		}, nil
+	case BinAcmeSh:
+		// acme.sh has no --agree-tos: it registers the account with the
+		// agreement accepted as part of `--issue`. The form still asks, because
+		// what is being agreed to is the same document either way.
+		argv := []string{BinAcmeSh, "--issue", "--accountemail", email}
+		argv = append(argv, method...)
+		return certs.Command{
+			Argv:        append(argv, domains...),
+			Description: "Obtain a certificate for " + name + " with acme.sh",
+			Destructive: true,
+		}, nil
+	default:
+		return certs.Command{}, fmt.Errorf(
+			"pki: %q is not a certificate client tui-cert drives", req.Client)
+	}
+}
+
+// ObtainWarning is what an obtain has to say before it runs. Both clients reach
+// the same authority and hit the same limits.
+const ObtainWarning = "This reaches a certificate authority and registers an " +
+	"account against that address if there is not one already. Let's Encrypt " +
+	"allows 5 failures per account, per hostname, per hour: a webroot that is " +
+	"not the one being served, or a standalone run with something already on " +
+	"port 80, will use them up before anything is issued."
+
+// The modes an installed pair is left with. A certificate is public and a
+// private key is not, and both are set in the command that copies the file
+// rather than left to the umask of whatever ran it.
+const (
+	InstallCertMode = "644"
+	InstallKeyMode  = "600"
+)
+
+// reloadUnits are the systemd units that make each server read its certificate
+// files again. The value is chosen when the destination is built, from where
+// the configuration was found, because Apache is `httpd` on one distribution
+// and `apache2` on another.
+var reloadUnits = map[string]string{
+	ServerNginx:  "nginx",
+	ServerApache: "httpd",
+}
+
+// BuildInstall copies a certificate and its key to the paths a server's
+// configuration names.
+//
+// The destination is chosen from a list the scanner already produced rather
+// than typed, and that is the whole point: the paths on that list are the paths
+// a server is configured to read, so an installation cannot land somewhere
+// nothing will look. Both files are copied with `install`, which sets the mode
+// in the same call that writes the file — a private key that exists for a moment
+// at whatever the umask allows is the finding this tool exists to report.
+//
+// A destination that is its own source is refused. `install a a` truncates the
+// file before it reads it, so the "installation" that looks like a no-op is the
+// one that loses the certificate.
+func BuildInstall(req certs.InstallRequest) (certs.InstallPlan, error) {
+	for _, spec := range []struct{ kind, path string }{
+		{"certificate", req.CertPath},
+		{"private key", req.KeyPath},
+		{"destination certificate", req.To.CertPath},
+		{"destination key", req.To.KeyPath},
+	} {
+		if err := CheckFilePath(spec.kind, spec.path); err != nil {
+			return certs.InstallPlan{}, err
+		}
+	}
+	if req.CertPath == req.To.CertPath || req.KeyPath == req.To.KeyPath {
+		return certs.InstallPlan{}, fmt.Errorf(
+			"%s is already where %s serves it from: installing a file over "+
+				"itself truncates it before it is read, so there is nothing to do "+
+				"here", req.To.CertPath, req.To.Server)
+	}
+
+	plan := certs.InstallPlan{
+		To: req.To,
+		Commands: []certs.Command{
+			{
+				Argv: []string{"install", "-m", InstallCertMode, req.CertPath,
+					req.To.CertPath},
+				Description: "Copy the certificate to " + req.To.CertPath +
+					", readable by anyone",
+				Destructive: true,
+			},
+			{
+				Argv: []string{"install", "-m", InstallKeyMode, req.KeyPath,
+					req.To.KeyPath},
+				Description: "Copy the private key to " + req.To.KeyPath +
+					", readable only by its owner",
+				Destructive: true,
+			},
+		},
+	}
+
+	if req.Reload {
+		unit := req.To.Reload
+		if unit == "" {
+			unit = reloadUnits[req.To.Server]
+		}
+		if !lineageRe.MatchString(unit) {
+			return certs.InstallPlan{}, fmt.Errorf(
+				"pki: %q is not a unit name tui-cert will reload", unit)
+		}
+		plan.Commands = append(plan.Commands, certs.Command{
+			Argv: []string{"systemctl", "reload", unit},
+			Description: "Tell " + unit + " to read its certificate files again, " +
+				"without dropping the connections it is holding",
+			Destructive: true,
+		})
+	}
+
+	plan.Warning = "Both destination files are overwritten. " + req.To.Server +
+		" keeps the pair it started with in memory until it is reloaded, so " +
+		"until then the served certificate and the file on disk are different " +
+		"certificates — which is exactly what the live check on screen 3 shows."
+	if !req.Reload {
+		plan.Warning += "\n\nNothing here reloads " + req.To.Server +
+			": the new pair sits on disk until something does."
+	}
+	return plan, nil
+}
+
+// Destinations turns what the scanner read out of the server configurations
+// into the list the install picker offers.
+//
+// Only nginx and Apache are offered. Caddy obtains and renews its own
+// certificates and keeps them in its own storage; a second tool writing a pair
+// into that tree is how a working setup breaks, and the sources screen already
+// says so. A reference that names a certificate and no key is skipped too: half
+// a pair is not a destination.
+func Destinations(references map[string][]ConfigRef) []certs.Destination {
+	seen := map[string]bool{}
+	var out []certs.Destination
+	for _, refs := range references {
+		for _, ref := range refs {
+			unit, ok := reloadUnits[ref.Reference.Server]
+			if !ok || ref.KeyPath == "" {
+				continue
+			}
+			if ref.Reference.Server == ServerApache &&
+				strings.HasPrefix(ref.Reference.File, "/etc/apache2") {
+				// Debian and its derivatives call the same server apache2, and
+				// the unit is named after the package rather than the daemon.
+				unit = "apache2"
+			}
+			key := ref.CertPath + "\x00" + ref.KeyPath
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, certs.Destination{
+				Server:    ref.Reference.Server,
+				CertPath:  ref.CertPath,
+				KeyPath:   ref.KeyPath,
+				Reference: ref.Reference,
+				Reload:    unit,
+			})
+		}
+	}
+	// A map is walked in a different order every time, and a picker that
+	// reshuffled itself between reads would be a picker nobody can trust.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CertPath != out[j].CertPath {
+			return out[i].CertPath < out[j].CertPath
+		}
+		return out[i].KeyPath < out[j].KeyPath
+	})
+	return out
 }
 
 // RateLimitWarning is what a forced renewal has to say before it runs. It is a
