@@ -594,7 +594,7 @@ is frozen is the contract a script or a habit can depend on:
   level: `tool`, `version`, `backend`, `describe`, the counts (`certificates`,
   `expired`, `expiring7`, `expiring30`, `mismatches`, `weakKeys`,
   `exposedKeys`, `unreadable`, `findings`, `risks`, `localCAs`), `certs`,
-  `acme`, `cas`, `trustStore`, `tools`, `locations`, `compat` and `model`.
+  `acme`, `cas`, `trustStore`, `tools`, `locations` and `compat`.
   Each `certs` row: `path`, `source`, `subject`, `sans`, `issuer`,
   `notAfter`, `daysLeft`, `keyType`, `keyBits`, `verdict`, `keyMatches`,
   `usedBy`, `findings`, `unreadable`, `localCA`, `issuerUntrusted`. Each `cas`
@@ -603,6 +603,11 @@ is frozen is the contract a script or a habit can depend on:
   `unreadable`. Each `acme` row: `client`, `present`, `version`, `timer`,
   `timerState`, `timerActive`, `certificates`, `unavailable`. A field marked
   optional is left out when it is empty, and that is part of its meaning.
+
+Not part of the contract: the `model` field of `--check`. It is a diagnostic
+dump of the tool's internal state, there for bug reports, and it may change in
+any release, minor or patch. Do not script against it; everything a script
+needs is in the fields above.
 
 A minor release only adds: new keys, new flags, new `--check` fields. Removing
 or renaming one, or changing what it means, happens only in a major release,
