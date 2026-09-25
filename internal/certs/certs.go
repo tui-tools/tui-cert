@@ -67,6 +67,17 @@ const (
 	FindingSANMismatch     = "san-mismatch"
 	FindingChainIncomplete = "chain-incomplete"
 	FindingUnreadable      = "unreadable"
+	// FindingIssuerUntrusted is a certificate a local CA signed while this
+	// machine does not trust that CA: every client here refuses it.
+	FindingIssuerUntrusted = "issuer-untrusted"
+	// FindingOutlivesCA is a certificate valid past the day its CA expires,
+	// which stops verifying on that day whatever its own dates say.
+	FindingOutlivesCA = "outlives-ca"
+	// The findings a local certificate authority carries.
+	FindingCAKeyReadable = "ca-key-readable"
+	FindingCAExpiring    = "ca-expiring"
+	FindingCAExpired     = "ca-expired"
+	FindingCAOutlived    = "ca-outlived"
 )
 
 // Finding is one thing worth saying about a certificate, in the user's terms.
@@ -260,6 +271,7 @@ const (
 	SourceSystem      = "system"
 	SourceServer      = "server config"
 	SourceConfigured  = "configured"
+	SourceLocalCA     = "local CA"
 )
 
 // Entry is one certificate file on this machine: the chain it carries, the
@@ -285,9 +297,37 @@ type Entry struct {
 	// an empty ChainError means it could not be attempted — a CA certificate
 	// or an expired leaf is not a chain question.
 	ChainVerified bool `json:"chainVerified"`
+	// IssuerUntrusted reports that the chain stopped at an authority this
+	// machine's trust store does not hold: a private CA nobody installed, or a
+	// missing intermediate. It is what the list flags beside the issuer.
+	IssuerUntrusted bool `json:"issuerUntrusted,omitempty"`
+	// LocalCA names the local certificate authority under /etc/tui-cert/ca
+	// that signed this certificate, empty when none of them did.
+	LocalCA string `json:"localCA,omitempty"`
+	// LocalCANotAfter is that authority's expiry, which a certificate it
+	// signed cannot usefully outlive.
+	LocalCANotAfter time.Time `json:"localCANotAfter,omitzero"`
 	// Verdict and Findings are what tui-cert thinks of the entry.
 	Verdict  Verdict   `json:"verdict"`
 	Findings []Finding `json:"findings,omitempty"`
+}
+
+// IssuerLabel is what the inventory's issuer column says: the local CA by name
+// when one of them signed it, the issuer family otherwise, and a flag when the
+// issuer is not one this machine trusts.
+func (e Entry) IssuerLabel() string {
+	leaf, ok := e.Leaf()
+	if !ok {
+		return ""
+	}
+	label := leaf.IssuerKind
+	if e.LocalCA != "" {
+		label = "ca:" + e.LocalCA
+	}
+	if e.IssuerUntrusted {
+		label += " (untrusted)"
+	}
+	return label
 }
 
 // Leaf is the end-entity certificate of the entry, which is the row the
@@ -460,6 +500,55 @@ type Model struct {
 	// Now is the instant every expiry was measured from, so a report and the
 	// screen that produced it agree.
 	Now time.Time `json:"now"`
+	// CAs are the local certificate authorities under /etc/tui-cert/ca.
+	CAs []CA `json:"cas,omitempty"`
+	// TrustStore names how this machine's trust store is managed — "debian",
+	// "fedora" or "arch" — empty when none of the three was recognised.
+	TrustStore string `json:"trustStore,omitempty"`
+}
+
+// CA returns one local certificate authority by name.
+func (m Model) CA(name string) (CA, bool) {
+	for _, ca := range m.CAs {
+		if ca.Name == name {
+			return ca, true
+		}
+	}
+	return CA{}, false
+}
+
+// CA is one local certificate authority: a directory under /etc/tui-cert/ca
+// holding ca.crt and, on the machine that issues from it, ca.key.
+//
+// A directory with only ca.crt is a CA this machine trusts or could trust but
+// does not issue from — which is what a CA copied here from another host is.
+type CA struct {
+	// Name is the directory name, which is also what the forms call it.
+	Name string `json:"name"`
+	// Dir, CertPath and KeyPath are where it lives.
+	Dir      string `json:"dir"`
+	CertPath string `json:"certPath"`
+	KeyPath  string `json:"keyPath"`
+	// Cert is the parsed ca.crt, absent when Unreadable says why.
+	Cert Cert `json:"cert"`
+	// Unreadable explains a CA whose certificate could not be read.
+	Unreadable string `json:"unreadable,omitempty"`
+	// Key is the private key's mode, from a stat. Nothing reads the key: its
+	// mode is the only fact about it worth a finding.
+	Key KeyFile `json:"key"`
+	// CanIssue reports that ca.key is here, so certificates can be signed.
+	CanIssue bool `json:"canIssue"`
+	// Trusted reports that this exact certificate is in the system trust
+	// store, read afresh on every load.
+	Trusted bool `json:"trusted"`
+	// Anchor is the trust-store file tui-cert installed for this CA, empty
+	// when there is none (or when the store keeps anchors its own way).
+	Anchor string `json:"anchor,omitempty"`
+	// Issued are the inventory paths this CA signed.
+	Issued []string `json:"issued,omitempty"`
+	// Verdict and Findings are what tui-cert thinks of the authority.
+	Verdict  Verdict   `json:"verdict"`
+	Findings []Finding `json:"findings,omitempty"`
 }
 
 // Entry returns one entry by path.
@@ -606,6 +695,23 @@ type Capabilities struct {
 	SupportsInstall bool
 	// InstallReason explains a false SupportsInstall in the user's terms.
 	InstallReason string
+	// SupportsCA reports that a local certificate authority can be created
+	// and issued from, which needs an openssl with `req -CA` (3.0).
+	SupportsCA bool
+	// CAReason explains a false SupportsCA in the user's terms.
+	CAReason string
+	// CARoot is the directory local CAs live in.
+	CARoot string
+	// IssuedRoot is where an issued pair goes when the form names no
+	// directory.
+	IssuedRoot string
+	// CAKeyTypes are the key types a CA and a certificate issued from it may
+	// have, in the order the forms offer them.
+	CAKeyTypes []string
+	// TrustStore names how the system trust store is managed, empty when it
+	// is none tui-cert knows, and TrustReason says why.
+	TrustStore  string
+	TrustReason string
 }
 
 // CanRenew reports whether any client can be asked to renew.
@@ -721,6 +827,73 @@ type InstallPlan struct {
 	Commands []Command
 }
 
+// CARequest is what the new-CA form collected.
+type CARequest struct {
+	// Name is the directory under the CA root, and the CA's common name.
+	Name string
+	// KeyType is one of Capabilities.CAKeyTypes.
+	KeyType string
+	// Days is the CA's validity.
+	Days int
+}
+
+// IssueRequest is what the issue form collected: a server certificate signed
+// by a local CA.
+type IssueRequest struct {
+	// CA names the authority, one of Model.CAs.
+	CA string
+	// CommonName is the subject CN, and the first SAN.
+	CommonName string
+	// SANs are the extra names, DNS names and IP addresses, already split.
+	SANs []string
+	// KeyType is one of Capabilities.CAKeyTypes.
+	KeyType string
+	// Days is the validity.
+	Days int
+	// Dir is the output directory; empty picks IssuedRoot/<name>.
+	Dir string
+	// Owner is "user" or "user:group" to hand the pair to, empty to leave it
+	// with root. It is the account the server that reads the pair runs as.
+	Owner string
+}
+
+// CAPlan and IssuePlan are what the confirm dialog shows for a new CA or an
+// issued pair: the files that will exist afterwards and the commands that put
+// them there.
+type CAPlan struct {
+	Dir      string
+	CertPath string
+	KeyPath  string
+	Subject  string
+	Warning  string
+	Commands []Command
+}
+
+// IssuePlan is an issuance the user is about to run.
+type IssuePlan struct {
+	CA        string
+	Dir       string
+	ChainPath string
+	KeyPath   string
+	Subject   string
+	SANValue  string
+	Owner     string
+	// Existing names a file the plan overwrites, empty when none.
+	Existing string
+	Warning  string
+	Commands []Command
+}
+
+// TrustPlan adds a local CA to the system trust store, or takes it out.
+type TrustPlan struct {
+	CA       string
+	Trust    bool
+	Store    string
+	Anchor   string
+	Warning  string
+	Commands []Command
+}
+
 // Backend is the boundary between the UI and the machine. Load reads state;
 // Probe makes the one network connection this tool ever makes; the Build*
 // methods turn user intent into previewable Commands; Run executes a Command
@@ -762,4 +935,13 @@ type Backend interface {
 	// configuration already names, and optionally tells the server to read
 	// them again.
 	BuildInstall(model Model, req InstallRequest) (InstallPlan, error)
+	// BuildCreateCA renders the commands that create a local certificate
+	// authority under the CA root.
+	BuildCreateCA(model Model, req CARequest) (CAPlan, error)
+	// BuildIssue renders the commands that sign a server certificate with a
+	// local CA and hand the pair to the account that reads it.
+	BuildIssue(model Model, req IssueRequest) (IssuePlan, error)
+	// BuildTrust renders the commands that put a local CA into the system
+	// trust store (trust true) or take it out again.
+	BuildTrust(model Model, name string, trust bool) (TrustPlan, error)
 }

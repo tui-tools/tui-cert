@@ -194,8 +194,10 @@ states a real one is found in: one that is fine, one expiring in five days that
 a renewal has quietly stopped happening for, one self-signed and long expired
 with its key world-readable, one from a private authority whose key is **not**
 its key, a wildcard, one an nginx configuration serves, and one nothing on the
-machine refers to any more. Every key works, every command is built and
-previewed for real, and nothing touches your system.
+machine refers to any more. Beside them is a local CA the machine has not
+trusted yet, with the two server certificates it signed, one of them for an IP
+address. Every key works, every command is built and previewed for real, and
+nothing touches your system.
 
 The demo's certificates are generated with `crypto/x509` when it starts and
 thrown away when it exits. There is no private key in this repository, not even
@@ -219,6 +221,8 @@ says exactly what each missing one costs.
 - `/etc/letsencrypt/live/*` — the certbot tree
 - `/etc/ssl/private`, `/etc/ssl/localcerts`, `/etc/pki/tls/{certs,private}`
 - `/etc/ssl/tui-cert` and `~/.local/share/tui-cert` — what this tool writes
+- `/etc/tui-cert/issued/*` — what a local CA issued, and `/etc/tui-cert/ca/*`,
+  the local CAs themselves, which have [a screen of their own](#a-local-ca)
 - `/etc/acme.sh` and `~/.acme.sh`
 - `/var/lib/caddy/.local/share/caddy/certificates` — read-only; Caddy renews
   these itself and a second tool writing there is how a working setup breaks
@@ -251,6 +255,8 @@ The list is not sorted by path. It is sorted by what needs you today:
 | `!` | expiring inside 30 days, which is the window an ACME client renews in |
 | `!` | the chain does not verify against the system trust store, with the exact error |
 | `!` | the key file is group-readable |
+| `!` | issued by a local CA this machine does not trust |
+| `!` | valid past the expiry of the local CA that signed it |
 
 One opinion is deliberately quieter than a checklist would have it. A
 certificate whose names are not this machine's host name is **not** a finding on
@@ -415,6 +421,122 @@ choice that looks like a no-op is the one that loses the certificate. And if the
 key beside the certificate is not that certificate's key, the dialog says so
 before you answer — the server would refuse to start with the pair.
 
+## A local CA
+
+![Local CAs](docs/screenshots/tui-cert-cas.png)
+
+A server reached by an IP address, or by a name no public DNS carries, cannot
+get a certificate from Let's Encrypt. What it needs instead is a small
+certificate authority of its own, a server certificate signed by it with the
+right names, and that authority trusted on every client. Screen `5` is that.
+
+**`N` creates one.** A name, a key (ECDSA P-256, or RSA 3072 for an old client)
+and a validity, ten years by default. It lives in one directory:
+
+```
+install -d -m 755 /etc/tui-cert/ca/homelab-ca
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout /etc/tui-cert/ca/homelab-ca/ca.key \
+  -out /etc/tui-cert/ca/homelab-ca/ca.crt -days 3650 -set_serial 0x… \
+  -subj /CN=homelab-ca -addext basicConstraints=critical,CA:TRUE,pathlen:0 \
+  -addext keyUsage=critical,keyCertSign,cRLSign
+chmod 600 /etc/tui-cert/ca/homelab-ca/ca.key
+chmod 644 /etc/tui-cert/ca/homelab-ca/ca.crt
+```
+
+`pathlen:0` means it signs server certificates and nothing that could sign in
+turn. An existing CA is refused rather than overwritten: a new `ca.key` orphans
+every certificate the old one signed and every client that trusts it.
+
+**`e` issues from it.** A common name, other names (DNS names and IP addresses,
+each checked, and an address goes in as `IP:`), a validity of 397 days by
+default and never past the CA's own expiry, a directory, and the **owner**: the
+account of the service that reads the pair.
+
+```
+openssl req -x509 -CA /etc/tui-cert/ca/homelab-ca/ca.crt \
+  -CAkey /etc/tui-cert/ca/homelab-ca/ca.key \
+  -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout /etc/tui-cert/issued/vpn.example.internal/privkey.pem \
+  -out /etc/tui-cert/issued/vpn.example.internal/fullchain.pem \
+  -days 397 -set_serial 0x… -subj /CN=vpn.example.internal \
+  -addext subjectAltName=DNS:vpn.example.internal,IP:192.0.2.10 \
+  -addext basicConstraints=critical,CA:FALSE \
+  -addext keyUsage=critical,digitalSignature -addext extendedKeyUsage=serverAuth
+tee -a /etc/tui-cert/issued/vpn.example.internal/fullchain.pem
+chmod 600 /etc/tui-cert/issued/vpn.example.internal/privkey.pem
+chmod 644 /etc/tui-cert/issued/vpn.example.internal/fullchain.pem
+chown headscale:headscale …/privkey.pem …/fullchain.pem
+```
+
+The result is `fullchain.pem` (the certificate, then the CA's) and
+`privkey.pem`, the two names every server configuration example uses. `tee -a`
+appends the CA's certificate, which is public; it is fed on standard input and
+its fingerprint is in the dialog. The directory is only created when it is not
+there already, because `install -d -m` on an existing one would change its
+mode. The default directory, `/etc/tui-cert/issued/<name>`, is in the
+inventory; one somewhere else is listed once you add it to `paths`. Every
+certificate list row then names the CA that signed it, and flags an issuer this
+machine does not trust.
+
+**`x` exports it.** The path, the SHA-256 fingerprint, and the one line to run
+on the other host, which copies only the certificate to the same place there:
+
+```
+ssh web01.example.com cat /etc/tui-cert/ca/homelab-ca/ca.crt \
+  | sudo install -D -m 644 /dev/stdin /etc/tui-cert/ca/homelab-ca/ca.crt
+```
+
+tui-cert on that host then lists the CA as certificate-only, and `t` there
+trusts it. Compare the fingerprint first: `openssl x509 -noout -fingerprint
+-sha256 -in` the file.
+
+**`t` trusts it on this host, `T` stops trusting it**, each distribution its own
+way:
+
+| | Trust | Untrust |
+| --- | --- | --- |
+| Debian, Ubuntu | `install -m 644 ca.crt /usr/local/share/ca-certificates/tui-cert-<name>.crt`, `update-ca-certificates` | `rm -f -- <that file>`, `update-ca-certificates` |
+| Fedora, RHEL | `install -m 644 ca.crt /etc/pki/ca-trust/source/anchors/tui-cert-<name>.crt`, `update-ca-trust extract` | `rm -f -- <that file>`, `update-ca-trust extract` |
+| Arch | `trust anchor --store ca.crt` | `trust anchor --remove ca.crt` |
+
+The anchor's name starts with `tui-cert-`, and an untrust removes only that
+file: a CA the distribution ships, or one somebody added by hand, is never
+touched. Whether a CA is trusted is read from the system bundle on every load,
+so the screen changes the moment the store does.
+
+The findings on this screen: a CA key any account but root can read (treat the
+CA as disclosed), a CA expiring (a warning once a default 397-day certificate
+would outlive it, a risk inside 30 days), and certificates it signed that
+outlive it.
+
+### Reading them from another tool
+
+`--check` lists the local CAs, and every certificate row names the CA that
+signed it, so a script needs nothing else:
+
+```console
+$ tui-cert --check | jq '.cas[0], (.certs[] | select(.localCA) | .path)'
+{
+  "name": "homelab-ca",
+  "certPath": "/etc/tui-cert/ca/homelab-ca/ca.crt",
+  "subject": "homelab-ca",
+  "fingerprint": "DA:B6:25:…:A7:2F",
+  "notAfter": "2035-09-25T03:39:50Z",
+  "daysLeft": 3286,
+  "keyType": "ECDSA",
+  "canIssue": true,
+  "trusted": false,
+  "issued": 2,
+  "verdict": "ok"
+}
+"/etc/tui-cert/issued/nas.example.internal/fullchain.pem"
+"/etc/tui-cert/issued/headscale.example.internal/fullchain.pem"
+```
+
+The only paths in the `cas` block are the CA's own. An issued pair is always
+`fullchain.pem` and `privkey.pem` in one directory.
+
 ## Usage
 
 ```sh
@@ -512,6 +634,9 @@ Every one of these is previewed and confirmed first.
 | `n` / `s` | `install -d -m 700 <dir>`, then `openssl req …`, then `chmod 600 <dir>/<name>.key` |
 | `I` | `certbot certonly --non-interactive --agree-tos -m <email> --webroot -w <dir> -d …`, or `--standalone -d …`; `acme.sh --issue --accountemail <email> …` for that client |
 | `i` | `install -m 644 <crt> <dst>`, `install -m 600 <key> <dst>`, then `systemctl reload nginx` or `httpd` |
+| `N` | `install -d -m 755 /etc/tui-cert/ca/<name>`, `openssl req -x509 …`, `chmod 600` the key, `chmod 644` the certificate |
+| `e` | `install -d -m 755 <dir>` when it is missing, `openssl req -x509 -CA …`, `tee -a <dir>/fullchain.pem`, two `chmod`, and `chown <owner>` when one is given |
+| `t` / `T` | the trust store's own commands, in [the table above](#a-local-ca); `rm -f` only ever removes the `tui-cert-` anchor a trust installed |
 
 Nothing else. There is no other code path that writes a file, and every path
 written to was either shown by the form or read out of a server's own
@@ -521,7 +646,7 @@ configuration.
 
 | Key | Action |
 | --- | --- |
-| `tab` / `1`–`4` | Move between certificates, renewal, live checks and sources |
+| `tab` / `1`–`5` | Move between certificates, renewal, live checks, sources and local CAs |
 | `↑`/`k`, `↓`/`j` | Move the selection, or scroll the detail screen |
 | `g` / `G` | First / last row |
 | `pgup` / `pgdn` | Scroll a page |
@@ -536,6 +661,10 @@ configuration.
 | `i` | Install the selected pair where a server configuration already names it |
 | `d` | Rehearse every renewal, writing nothing |
 | `F` | Renew the selected certificate now |
+| `N` | Create a local certificate authority |
+| `e` | Issue a server certificate from the selected CA |
+| `x` | Export the selected CA: path, fingerprint, copy command |
+| `t` / `T` | Trust the selected CA on this machine / stop trusting it |
 | `R` | Re-read this machine |
 | `?` | Help |
 | `q` | Quit |
@@ -573,12 +702,16 @@ In the **generator**: `tab` moves between fields, `←`/`→` cycles a choice,
   the subscriber agreement has been accepted in the form.
 - Install a certificate and its key to the paths an nginx or Apache
   configuration already names, at 644 and 600, and reload that server.
+- Run a local certificate authority: create one, issue server certificates for
+  DNS names and IP addresses owned by the account that reads them, export it,
+  and trust or untrust it on Debian, Fedora and Arch.
 - Follow the active Omarchy theme, and respect `NO_COLOR`.
 
 ## What v0.1 cannot do
 
 - **No certificate is ever deleted, moved or rewritten.** The only thing written
-  is a new pair, into a directory you chose.
+  is a new pair, into a directory you chose. The one removal is `T`, and what it
+  removes is the trust anchor `t` installed.
 - **No revocation check.** The OCSP and CRL endpoints are shown; nothing is
   fetched from them. A live check reports whether a response was *stapled*,
   which is a fact about the handshake rather than a query.
@@ -595,7 +728,9 @@ In the **generator**: `tab` moves between fields, `←`/`→` cycles a choice,
   out of the files under `/etc/nginx`, `/etc/apache2`, `/etc/httpd` and
   `/etc/caddy`; a certificate named from somewhere else is still listed if it is
   in one of the scanned directories, it just will not say who serves it.
-- **No client certificates or CA operation.** No `openssl ca`, no signing.
+- **A local CA signs server certificates and nothing else.** No client
+  certificates, no intermediates, no revocation list, no name constraints, and
+  no re-keying of a CA: a new one is a new name.
 
 ## Compatibility
 
@@ -642,12 +777,13 @@ hidden; one below the minimum is marked as such and the tool still runs.
 | Version read with | `openssl version` |
 | Minimum | 1.1.1 |
 | Tested | `3.0.13`, `3.5.5`, `3.6.4` |
-| Version-gated features | `addext` (since 1.1.1) |
+| Version-gated features | `addext` (since 1.1.1), `req-ca` (since 3.0.0) |
 
 | Versions | What changes |
 | --- | --- |
 | `<1.1.1` | `openssl req` has no `-addext`, so a subject alternative name cannot be set on the command line; tui-cert will not write an openssl configuration file, so the generate keys say why they are unavailable rather than producing a certificate no client accepts |
-| `>=1.1.1` | openssl is only ever used to generate a key pair; nothing is read with it, so a machine without it loses two keys and keeps every screen |
+| `<3.0.0` | `openssl req` cannot sign with a CA (`-CA` arrived in 3.0), and tui-cert signs only through it rather than write an extensions file: the local CA keys say why they are unavailable, and everything else works |
+| `>=1.1.1` | openssl is only ever used to generate a key pair or sign one with a local CA; nothing is read with it, so a machine without it loses those keys and keeps every screen |
 
 The tested versions are generated from `compat/results.jsonl`, which the tool's
 own smoke test appends to when it runs against a real machine in
@@ -705,7 +841,9 @@ Live{Target, Protocol, Cipher, Chain, Stapled, FilePath, Matches, Findings}
 `internal/pki` is the only package that starts a process, and it starts one for
 six programs — `certbot`, `acme.sh`, `openssl`, `systemctl`, `install` and
 `chmod`, plus `cat`, `ls` and `stat` as the escalated fallbacks for a directory
-an ordinary user cannot open. Reading a certificate is not among them.
+an ordinary user cannot open. The local CA adds `chown`, `tee`, `rm`, and the
+trust store's own `update-ca-certificates`, `update-ca-trust` or `trust`.
+Reading a certificate is not among them.
 [`check-exec.sh`](https://github.com/tui-tools/tui-kit/blob/main/tools/check-exec.sh)
 fails the build if any other package imports `os/exec`.
 
@@ -755,6 +893,10 @@ widgets, the config loader and the command runner shared by the whole family.
   each client's own trust store. The dialog says so before it generates one.
 - **A world-readable key is a disclosed key.** Fixing the mode does not undo
   that; the certificate has to be replaced with a new key.
+- **Trusting a CA trusts everything it signs, for any name.** Whoever holds
+  `ca.key` can impersonate any site to a machine that trusts it. The key stays
+  at mode 600, is never read by this tool and never shown; back it up where
+  only root can read it.
 - Three reads escalate, unprompted, through `sudo -n`: `ls`, `stat` and `cat`,
   for the certificate directories an ordinary user cannot open. A private key is
   never one of them.

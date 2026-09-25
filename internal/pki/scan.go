@@ -107,6 +107,8 @@ func scanLocations(home string) []Location {
 		{Path: "/etc/pki/tls/private", Kind: "system", Source: certs.SourceSystem, Depth: 1},
 		{Path: SystemCreateDir, Kind: "written by tui-cert",
 			Source: certs.SourceSystem, Depth: 1},
+		{Path: IssuedRoot, Kind: "issued by a local CA",
+			Source: certs.SourceLocalCA, Depth: 2},
 		{Path: "/etc/acme.sh", Kind: "acme.sh", Source: certs.SourceAcmeSh, Depth: 2},
 		{Path: "/var/lib/caddy/.local/share/caddy/certificates", Kind: "Caddy",
 			Source: certs.SourceCaddy, Depth: 4},

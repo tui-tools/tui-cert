@@ -28,6 +28,9 @@ const (
 	fieldWebroot = "webroot"
 	fieldEmail   = "email"
 	fieldAgree   = "agree"
+	// The local CA forms' own fields.
+	fieldCA    = "ca"
+	fieldOwner = "owner"
 )
 
 // formKind is what an open form is building, so the submit knows which builder
@@ -42,6 +45,10 @@ const (
 	// formObtain asks an ACME client for a certificate a public authority
 	// signs.
 	formObtain
+	// formCA creates a local certificate authority.
+	formCA
+	// formIssue signs a server certificate with a local CA.
+	formIssue
 )
 
 // The two values the agreement toggle takes. It is a choice field rather than
@@ -182,6 +189,102 @@ func newObtainForm(client, hostname, webroot string) createForm {
 	return f
 }
 
+// newCAForm builds the new-CA form. Three fields: the name is the only thing
+// that cannot be defaulted, and the key and the validity have defaults worth
+// keeping.
+func newCAForm(caps certs.Capabilities, hostname string) createForm {
+	keyTypes := caps.CAKeyTypes
+	if len(keyTypes) == 0 {
+		keyTypes = pki.CAKeyTypes
+	}
+	name := "local-ca"
+	if short, _, _ := strings.Cut(hostname, "."); pki.CheckCAName(short+"-ca") == nil &&
+		short != "" {
+		name = short + "-ca"
+	}
+	f := createForm{
+		kind: formCA,
+		values: map[string]string{
+			fieldName:    name,
+			fieldKeyType: keyTypes[0],
+			fieldDays:    strconv.Itoa(pki.DefaultCADays),
+		},
+	}
+	root := caps.CARoot
+	if root == "" {
+		root = pki.CARoot
+	}
+	f.fields = []formField{
+		{key: fieldName, label: "Name",
+			help: "The CA's name: its directory under " + root + ", and its " +
+				"common name. Letters, digits, dots, dashes and underscores."},
+		{key: fieldKeyType, label: "Key", options: keyTypes,
+			help: "ec:prime256v1 is what every current client speaks. rsa:3072 " +
+				"for the old one that does not."},
+		{key: fieldDays, label: "Valid for",
+			help: "Days. 3650 is ten years: the CA is what every client has to " +
+				"be told to trust, so it should outlast what it signs."},
+	}
+	f.input = textinput.New()
+	f.input.CharLimit = 300
+	f.input.Prompt = ""
+	f.focusActive()
+	return f
+}
+
+// newIssueForm builds the issue form, on the CA the reader had selected and
+// seeded with this machine's own name.
+func newIssueForm(caps certs.Capabilities, cas []string, current,
+	hostname string) createForm {
+	keyTypes := caps.CAKeyTypes
+	if len(keyTypes) == 0 {
+		keyTypes = pki.CAKeyTypes
+	}
+	root := caps.IssuedRoot
+	if root == "" {
+		root = pki.IssuedRoot
+	}
+	f := createForm{
+		kind: formIssue,
+		values: map[string]string{
+			fieldCA:      current,
+			fieldName:    hostname,
+			fieldSANs:    "",
+			fieldKeyType: keyTypes[0],
+			fieldDays:    strconv.Itoa(pki.DefaultIssueDays),
+			fieldDir:     "",
+			fieldOwner:   "",
+		},
+	}
+	f.fields = []formField{
+		{key: fieldCA, label: "CA", options: cas,
+			help: "The local CA that signs it. Only the CAs whose key is on " +
+				"this machine are offered."},
+		{key: fieldName, label: "Common name",
+			help: "The name this is for. It becomes the subject and the first " +
+				"subject alternative name; an IP address works too."},
+		{key: fieldSANs, label: "Other names",
+			help: "Space-separated extra names: DNS names, and IP addresses for " +
+				"a server reached by address. Each is checked."},
+		{key: fieldKeyType, label: "Key", options: keyTypes,
+			help: "ec:prime256v1 unless a client needs RSA."},
+		{key: fieldDays, label: "Valid for",
+			help: "Days. 397 is the longest a browser accepts; it can never be " +
+				"longer than the CA has left."},
+		{key: fieldDir, label: "Into",
+			help: "The directory for fullchain.pem and privkey.pem. Empty is " +
+				root + "/<common name>, which tui-cert lists."},
+		{key: fieldOwner, label: "Owner",
+			help: "user or user:group of the service that reads the pair, e.g. " +
+				"headscale:headscale. Empty leaves it with root."},
+	}
+	f.input = textinput.New()
+	f.input.CharLimit = 300
+	f.input.Prompt = ""
+	f.focusActive()
+	return f
+}
+
 // ObtainMethods is the order the method field offers the two challenges in. It
 // is the backend's list, so the form cannot offer one the builder refuses.
 var ObtainMethods = pki.ObtainMethods
@@ -196,6 +299,9 @@ const DefaultWebroot = "/var/www/html"
 // decides that, and offering the field would be offering a value that goes
 // nowhere. The webroot is dropped for a standalone challenge, which has none.
 func (f createForm) visible() []formField {
+	if f.kind == formCA || f.kind == formIssue {
+		return f.fields
+	}
 	if f.kind == formObtain {
 		if f.values[fieldMethod] != string(certs.ObtainStandalone) {
 			return f.fields
@@ -366,10 +472,58 @@ func (f *createForm) obtainRequest() certs.ObtainRequest {
 	return request
 }
 
+// caRequest is what the new-CA form collected.
+func (f *createForm) caRequest() (certs.CARequest, error) {
+	f.save()
+	request := certs.CARequest{
+		Name:    strings.TrimSpace(f.values[fieldName]),
+		KeyType: f.values[fieldKeyType],
+	}
+	if request.Name == "" {
+		return request, fmt.Errorf("a CA needs a name")
+	}
+	days, err := strconv.Atoi(strings.TrimSpace(f.values[fieldDays]))
+	if err != nil {
+		return request, fmt.Errorf("%q is not a number of days", f.values[fieldDays])
+	}
+	request.Days = days
+	return request, nil
+}
+
+// issueRequest is what the issue form collected. What a name, a directory and
+// an owner may be is the backend's rule, checked where the argv is built.
+func (f *createForm) issueRequest() (certs.IssueRequest, error) {
+	f.save()
+	request := certs.IssueRequest{
+		CA:         f.values[fieldCA],
+		CommonName: strings.TrimSpace(f.values[fieldName]),
+		KeyType:    f.values[fieldKeyType],
+		Dir:        strings.TrimSpace(f.values[fieldDir]),
+		Owner:      strings.TrimSpace(f.values[fieldOwner]),
+	}
+	if request.CommonName == "" {
+		return request, fmt.Errorf("a certificate needs a name")
+	}
+	request.SANs = strings.FieldsFunc(f.values[fieldSANs], func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t'
+	})
+	days, err := strconv.Atoi(strings.TrimSpace(f.values[fieldDays]))
+	if err != nil {
+		return request, fmt.Errorf("%q is not a number of days", f.values[fieldDays])
+	}
+	request.Days = days
+	return request, nil
+}
+
 // title names the form for its dialog.
 func (f createForm) title() string {
-	if f.kind == formObtain {
+	switch f.kind {
+	case formObtain:
 		return "Obtain a certificate with " + f.values[fieldKind]
+	case formCA:
+		return "Create a local certificate authority"
+	case formIssue:
+		return "Issue a server certificate from " + f.values[fieldCA]
 	}
 	if f.values[fieldKind] == string(certs.CreateCSR) {
 		return "Generate a certificate signing request"
@@ -379,8 +533,13 @@ func (f createForm) title() string {
 
 // footnote is the one line under the form: what it will not do.
 func (f createForm) footnote() string {
-	if f.kind == formObtain {
+	switch f.kind {
+	case formObtain:
 		return "Nothing is requested until the agreement says yes."
+	case formCA:
+		return "The CA key never leaves this machine and is never shown."
+	case formIssue:
+		return "The private key is written at 600 and never shown."
 	}
 	return "The private key never leaves this machine and is never shown."
 }

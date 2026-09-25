@@ -146,6 +146,22 @@ check "the optional programs are reported" \
   "$bin --check" \
   '"purpose":'
 
+# 3b. The local CAs are reported, even when there are none: the count is a
+#     number, the block is a list, and the trust store the CA keys would change
+#     is named. Nothing here creates a CA — that is a mutation, and this suite
+#     runs none.
+check "local CAs are counted" \
+  "$bin --check" \
+  '"localCAs": [0-9]+'
+
+check "the local CA block is a list" \
+  "$bin --check" \
+  '"cas": \['
+
+check "the trust store is recognised" \
+  "$bin --check" \
+  '"trustStore": "(debian|fedora|arch)"'
+
 # 4. certbot, when it is here, is read and its timer state reported; and when
 #    it is not, that is said plainly rather than passed over. No image in the
 #    lab ships certbot, so the absent branch is the one that actually runs, and
@@ -297,7 +313,7 @@ fi
 #    line in its output would mean it had built one.
 check_absent "--check builds no command" \
   "$bin --check" \
-  'certbot renew|openssl req|install -d -m 700|chmod 600'
+  'certbot renew|openssl req|install -d -m 700|chmod 600|update-ca-certificates|update-ca-trust|trust anchor'
 
 # 7. --check opens no network connection. The live check is the one thing in
 #    this tool that does, and it only ever happens because a key was pressed —

@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io/fs"
 	"math/big"
+	"net"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,15 +34,34 @@ import (
 type Fake struct {
 	files map[string][]byte
 	modes map[string]fs.FileMode
-	roots *x509.CertPool
-	model certs.Model
-	run   *runner.Fake
-	now   func() time.Time
+	// publicRoot is the demo's stand-in for a public root, the one
+	// certificate the sample machine's trust store holds from the start.
+	publicRoot *x509.Certificate
+	model      certs.Model
+	run        *runner.Fake
+	now        func() time.Time
 	// issuer is the demo authority, kept so a renewal can issue a fresh
 	// certificate the way the real one would.
 	issuer    *x509.Certificate
 	issuerKey *ecdsa.PrivateKey
+	// authorities are the sample machine's local CAs, by certificate path, so
+	// an issuance can sign with the key the real one would have used.
+	authorities map[string]demoAuthority
 }
+
+// demoAuthority is one local CA on the sample machine, key included: the key
+// lives only in this process, the way the demo's other keys do.
+type demoAuthority struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+}
+
+// demoCA is the sample machine's local CA, and demoTrustStore the kind of
+// trust store the sample machine has.
+const (
+	demoCA         = "homelab-ca"
+	demoTrustStore = TrustDebian
+)
 
 // demoHostname is the sample machine's name, which is what the host name
 // finding is measured against.
@@ -81,6 +102,7 @@ func (f *Fake) reset() {
 	now := f.now()
 	f.files = map[string][]byte{}
 	f.modes = map[string]fs.FileMode{}
+	f.authorities = map[string]demoAuthority{}
 
 	// Expiries are set a little past midnight of the target day, because days
 	// left is counted in whole days: an expiry exactly N days away is N-1 whole
@@ -98,9 +120,7 @@ func (f *Fake) reset() {
 	publicCA, publicCAKey := f.authority("R11", "Let's Encrypt", publicRoot, publicRootKey)
 	internalCA, internalCAKey := f.authority("Demo Internal CA", "Example Ltd", nil, nil)
 	f.issuer, f.issuerKey = publicCA, publicCAKey
-
-	f.roots = x509.NewCertPool()
-	f.roots.AddCert(publicRoot)
+	f.publicRoot = publicRoot
 
 	// 1. The one that is fine.
 	f.issueTo("/etc/letsencrypt/live/example.com/fullchain.pem",
@@ -155,6 +175,21 @@ func (f *Fake) reset() {
 	f.write(demoFile{path: "/etc/nginx/conf.d/api.conf", mode: 0o644,
 		body: []byte(demoNginxConf)})
 
+	// 8 and 9. A local CA this machine made and has not trusted yet, and the
+	//    two server certificates it signed: one reached by name and by
+	//    address, the way a self-hosted control server on a cloud VM is, and
+	//    one by name only.
+	local, localKey := f.localAuthority(demoCA, now.AddDate(-1, 0, 0),
+		now.AddDate(9, 0, 0))
+	f.issueTo(path.Join(IssuedRoot, "headscale.example.internal", ChainFile),
+		path.Join(IssuedRoot, "headscale.example.internal", PrivKeyFile), 0o600,
+		[]string{"headscale.example.internal", "192.0.2.10"}, in(380),
+		local, localKey, true, true)
+	f.issueTo(path.Join(IssuedRoot, "nas.example.internal", ChainFile),
+		path.Join(IssuedRoot, "nas.example.internal", PrivKeyFile), 0o600,
+		[]string{"nas.example.internal"}, in(200),
+		local, localKey, true, true)
+
 	f.rebuild()
 }
 
@@ -175,21 +210,74 @@ const demoNginxConf = `server {
 }
 `
 
+// localAuthority writes a local CA onto the sample machine, the way
+// BuildCreateCA would have: ca.crt at 0644, ca.key at 0600.
+func (f *Fake) localAuthority(name string, notBefore, notAfter time.Time) (
+	*x509.Certificate, *ecdsa.PrivateKey) {
+	key := mustKey()
+	template := &x509.Certificate{
+		SerialNumber:          serial(name + "-ca"),
+		Subject:               pkix.Name{CommonName: name},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		MaxPathLenZero:        true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template,
+		&key.PublicKey, key)
+	if err != nil {
+		panic("pki: the demo CA could not be created: " + err.Error())
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		panic("pki: the demo CA does not parse: " + err.Error())
+	}
+	_, certPath, keyPath := caPaths(CARoot, name)
+	f.write(demoFile{path: certPath, mode: 0o644,
+		body: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})})
+	f.write(demoFile{path: keyPath, mode: 0o600, body: pemKey(key)})
+	f.authorities[certPath] = demoAuthority{cert: cert, key: key}
+	return cert, key
+}
+
+// trustSet is the sample machine's trust store: the demo's public root, plus
+// every local CA whose anchor has been installed — so `t` on the demo changes
+// what verifies, exactly as it does on a real machine.
+func (f *Fake) trustSet() TrustSet {
+	anchors := []*x509.Certificate{f.publicRoot}
+	for certPath, authority := range f.authorities {
+		name := path.Base(path.Dir(certPath))
+		if _, ok := f.files[AnchorPath(demoTrustStore, name)]; ok {
+			anchors = append(anchors, authority.cert)
+		}
+	}
+	return NewTrustSet(anchors...)
+}
+
 // rebuild runs the sample machine's files through the real pipeline: the same
 // scan, the same parser, the same judgement.
 func (f *Fake) rebuild() {
 	now := f.now()
 	model := certs.Model{Backend: "pki", Now: now, Hostname: demoHostname}
 	fsys := f.fs()
+	trust := f.trustSet()
 	found, references, locations := Scan(fsys, scanLocations(""), nil)
 	model.Locations = locations
 	for _, file := range found {
 		model.Entries = append(model.Entries,
-			BuildEntry(fsys, file, references[file.Path], f.roots, now,
+			BuildEntry(fsys, file, references[file.Path], trust.Pool, now,
 				model.Hostname))
 	}
 	certs.SortEntries(model.Entries)
 	model.Destinations = Destinations(references)
+
+	model.TrustStore = demoTrustStore
+	cas, location := LoadCAs(fsys, CARoot, trust, demoTrustStore, now)
+	model.Locations = append(model.Locations, location)
+	model.Entries, model.CAs = AttachIssuers(fsys, model.Entries, cas, now,
+		model.Hostname)
 
 	model.ACME = []certs.ACME{{
 		Client:      BinCertbot,
@@ -265,10 +353,20 @@ func (f *Fake) issueTo(certPath, keyPath string, keyMode fs.FileMode,
 	issuerKey *ecdsa.PrivateKey, chain bool, withKey bool) {
 	key := mustKey()
 	now := f.now()
+	var dnsNames []string
+	var addresses []net.IP
+	for _, name := range names {
+		if ip := net.ParseIP(name); ip != nil {
+			addresses = append(addresses, ip)
+			continue
+		}
+		dnsNames = append(dnsNames, name)
+	}
 	template := &x509.Certificate{
 		SerialNumber:          serial(names[0]),
 		Subject:               pkix.Name{CommonName: names[0]},
-		DNSNames:              names,
+		DNSNames:              dnsNames,
+		IPAddresses:           addresses,
 		NotBefore:             notAfter.AddDate(0, -3, 0),
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -403,6 +501,13 @@ func (f *Fake) Capabilities() certs.Capabilities {
 		// The sample machine has `install` and `systemctl`, the way a machine
 		// running nginx does.
 		SupportsInstall: true,
+		// And an openssl new enough to sign with a CA, on a Debian-style
+		// trust store.
+		SupportsCA: true,
+		CARoot:     CARoot,
+		IssuedRoot: IssuedRoot,
+		CAKeyTypes: CAKeyTypes,
+		TrustStore: demoTrustStore,
 	}
 }
 
@@ -493,8 +598,38 @@ func (f *Fake) apply(cmd certs.Command) (string, error) {
 		return "", nil
 	}
 	switch {
+	case argv[0] == BinOpenSSL && argv[1] == "req" && contains(argv, "-CA"):
+		return f.issueFromCA(argv)
+	case argv[0] == BinOpenSSL && argv[1] == "req" &&
+		contains(argv, "basicConstraints=critical,CA:TRUE,pathlen:0"):
+		return f.createAuthority(argv)
 	case argv[0] == BinOpenSSL && argv[1] == "req":
 		return f.generate(argv)
+	case argv[0] == "tee" && len(argv) == 3 && argv[1] == "-a":
+		f.files[argv[2]] = append(append([]byte{}, f.files[argv[2]]...),
+			[]byte(cmd.Stdin)...)
+		f.rebuild()
+		return "", nil
+	case argv[0] == "chmod" && len(argv) == 3:
+		if _, ok := f.files[argv[2]]; !ok {
+			return "", fmt.Errorf("chmod: cannot access '%s': No such file or directory",
+				argv[2])
+		}
+		bits, err := parseOctalMode(argv[1])
+		if err != nil {
+			return "", err
+		}
+		f.modes[argv[2]] = bits
+		f.rebuild()
+		return "", nil
+	case argv[0] == "rm":
+		delete(f.files, argv[len(argv)-1])
+		delete(f.modes, argv[len(argv)-1])
+		f.rebuild()
+		return "", nil
+	case argv[0] == BinUpdateCACertificates:
+		f.rebuild()
+		return "Updating certificates in /etc/ssl/certs...\ndone.", nil
 	case argv[0] == BinCertbot && contains(argv, "--dry-run"):
 		return "Congratulations, all simulated renewals succeeded.", nil
 	case argv[0] == BinCertbot && contains(argv, "--force-renewal"):
@@ -539,6 +674,57 @@ func (f *Fake) generate(argv []string) (string, error) {
 	}
 	f.issueTo(out, keyOut, 0o600, names, f.now().AddDate(0, 0, DefaultDays),
 		nil, nil, false, true)
+	f.rebuild()
+	return "", nil
+}
+
+// createAuthority writes the CA `openssl req -x509` with CA:TRUE would have
+// created.
+func (f *Fake) createAuthority(argv []string) (string, error) {
+	out, keyOut := flagValue(argv, "-out"), flagValue(argv, "-keyout")
+	name := strings.TrimPrefix(flagValue(argv, "-subj"), "/CN=")
+	if out == "" || keyOut == "" || name == "" {
+		return "", fmt.Errorf("openssl: this command line names no output")
+	}
+	days, err := strconv.Atoi(flagValue(argv, "-days"))
+	if err != nil {
+		return "", fmt.Errorf("openssl: -days is not a number")
+	}
+	now := f.now()
+	f.localAuthority(name, now, now.AddDate(0, 0, days))
+	f.rebuild()
+	return "", nil
+}
+
+// issueFromCA writes the certificate `openssl req -x509 -CA` would have
+// signed: the leaf alone, since the chain is completed by the tee after it.
+func (f *Fake) issueFromCA(argv []string) (string, error) {
+	authority, ok := f.authorities[flagValue(argv, "-CA")]
+	if !ok {
+		return "", fmt.Errorf("openssl: Could not open file or uri for loading " +
+			"CA certificate")
+	}
+	out, keyOut := flagValue(argv, "-out"), flagValue(argv, "-keyout")
+	commonName := strings.TrimPrefix(flagValue(argv, "-subj"), "/CN=")
+	days, err := strconv.Atoi(flagValue(argv, "-days"))
+	if out == "" || keyOut == "" || commonName == "" || err != nil {
+		return "", fmt.Errorf("openssl: this command line names no output")
+	}
+	names := []string{commonName}
+	for _, value := range argv {
+		sans, isSAN := strings.CutPrefix(value, "subjectAltName=")
+		if !isSAN {
+			continue
+		}
+		for _, entry := range strings.Split(sans, ",") {
+			_, name, _ := strings.Cut(entry, ":")
+			if name != "" && name != commonName {
+				names = append(names, name)
+			}
+		}
+	}
+	f.issueTo(out, keyOut, 0o600, names, f.now().AddDate(0, 0, days),
+		authority.cert, authority.key, false, true)
 	f.rebuild()
 	return "", nil
 }
@@ -671,4 +857,59 @@ func (f *Fake) BuildCreate(_ certs.Model,
 		}
 	}
 	return BuildCreate(req, existing)
+}
+
+// BuildCreateCA renders the same plan the real backend renders, refusing a
+// name the sample machine already has a CA under.
+func (f *Fake) BuildCreateCA(_ certs.Model, req certs.CARequest) (
+	certs.CAPlan, error) {
+	existing := ""
+	if CheckCAName(req.Name) == nil {
+		_, certPath, keyPath := caPaths(CARoot, req.Name)
+		for _, candidate := range []string{certPath, keyPath} {
+			if _, ok := f.files[candidate]; ok {
+				existing = candidate
+				break
+			}
+		}
+	}
+	return BuildCreateCA(req, CARoot, NewSerial(), existing)
+}
+
+// BuildIssue renders the same plan the real backend renders, from the sample
+// machine's own files.
+func (f *Fake) BuildIssue(model certs.Model, req certs.IssueRequest) (
+	certs.IssuePlan, error) {
+	ca, ok := model.CA(req.CA)
+	if !ok {
+		return certs.IssuePlan{}, fmt.Errorf("there is no local CA named %q", req.CA)
+	}
+	dir := IssueDir(req)
+	input := IssueInput{CA: ca, CAPEM: f.files[ca.CertPath], Serial: NewSerial(),
+		Now: f.now()}
+	for name := range f.files {
+		if strings.HasPrefix(name, dir+"/") {
+			input.DirExists = true
+			break
+		}
+	}
+	for _, candidate := range []string{path.Join(dir, ChainFile),
+		path.Join(dir, PrivKeyFile)} {
+		if _, exists := f.files[candidate]; exists {
+			input.Existing = candidate
+			break
+		}
+	}
+	return BuildIssue(req, input)
+}
+
+// BuildTrust renders the same plan the real backend renders, for the sample
+// machine's Debian-style store.
+func (f *Fake) BuildTrust(model certs.Model, name string, trust bool) (
+	certs.TrustPlan, error) {
+	ca, ok := model.CA(name)
+	if !ok {
+		return certs.TrustPlan{}, fmt.Errorf("there is no local CA named %q", name)
+	}
+	return BuildTrust(ca, demoTrustStore, trust)
 }

@@ -47,6 +47,8 @@ func (a *app) View() string {
 			a.width, a.height)
 	case modeDetail:
 		return a.detailView()
+	case modeExport:
+		return a.exportView()
 	}
 	return a.browseView()
 }
@@ -94,6 +96,8 @@ func (a *app) emptyMessage() string {
 		return "no live check yet — press c on a certificate to open one"
 	case screenSources:
 		return "nothing was searched, which should not happen"
+	case screenCAs:
+		return "no local certificate authority on this machine — press N to create one"
 	default:
 		return a.noCertificatesMessage()
 	}
@@ -209,6 +213,8 @@ func (a *app) defaultStatus() string {
 		return count + " live checks  ·  C checks another host" + suffix
 	case screenSources:
 		return count + " places and programs" + suffix
+	case screenCAs:
+		return count + " local CAs  ·  N creates one, e issues from it" + suffix
 	default:
 		return count + " certificates  ·  c checks one live, n generates one" + suffix
 	}
@@ -238,6 +244,8 @@ func (a *app) tableData() ([]ui.Column, [][]string, []*lipgloss.Style) {
 		return a.liveTable()
 	case screenSources:
 		return a.sourcesTable()
+	case screenCAs:
+		return a.caTable()
 	default:
 		return a.certsTable()
 	}
@@ -255,7 +263,7 @@ func (a *app) certsTable() ([]ui.Column, [][]string, []*lipgloss.Style) {
 	showPath := a.width >= 92
 	showUsedBy := a.width >= 104
 	if showIssuer {
-		columns = append(columns, ui.Column{Title: "ISSUER", Width: 16, Flex: true})
+		columns = append(columns, ui.Column{Title: "ISSUER", Width: 24, Flex: true})
 	}
 	if showPath {
 		columns = append(columns, ui.Column{Title: "FILE", Width: 28, Flex: true})
@@ -272,7 +280,7 @@ func (a *app) certsTable() ([]ui.Column, [][]string, []*lipgloss.Style) {
 		if has {
 			name = leaf.Label()
 			left = daysCell(leaf.DaysLeft)
-			issuer = leaf.IssuerKind
+			issuer = entry.IssuerLabel()
 		}
 		if entry.Unreadable != "" {
 			left, issuer = "—", "unreadable"
@@ -289,6 +297,47 @@ func (a *app) certsTable() ([]ui.Column, [][]string, []*lipgloss.Style) {
 		}
 		rows = append(rows, row)
 		styles = append(styles, a.verdictStyle(entry.Verdict))
+	}
+	return columns, rows, styles
+}
+
+// caTable is the local CAs: when each expires, whether this machine trusts
+// it, and what it signed.
+func (a *app) caTable() ([]ui.Column, [][]string, []*lipgloss.Style) {
+	columns := []ui.Column{
+		{Title: "CA", Width: 18, Flex: true},
+		{Title: "LEFT", Width: 6},
+		{Title: "", Width: 3},
+		{Title: "TRUST", Width: 9},
+	}
+	showIssued := a.width >= 64
+	showFingerprint := a.width >= 100
+	if showIssued {
+		columns = append(columns, ui.Column{Title: "ISSUED", Width: 7})
+	}
+	if showFingerprint {
+		columns = append(columns, ui.Column{Title: "SHA-256", Width: 28, Flex: true})
+	}
+	rows := make([][]string, 0, len(a.caRows))
+	styles := make([]*lipgloss.Style, 0, len(a.caRows))
+	for _, ca := range a.caRows {
+		left := "—"
+		if ca.Unreadable == "" {
+			left = daysCell(ca.Cert.DaysLeft)
+		}
+		name := ca.Name
+		if !ca.CanIssue {
+			name += " (cert only)"
+		}
+		row := []string{name, left, verdictMark(ca.Verdict), trustWord(ca)}
+		if showIssued {
+			row = append(row, strconv.Itoa(len(ca.Issued)))
+		}
+		if showFingerprint {
+			row = append(row, orNone(ca.Cert.Fingerprint))
+		}
+		rows = append(rows, row)
+		styles = append(styles, a.verdictStyle(ca.Verdict))
 	}
 	return columns, rows, styles
 }
@@ -483,6 +532,8 @@ func (a *app) detailLines() []string {
 		return a.liveDetail()
 	case screenSources:
 		return a.sourceDetail()
+	case screenCAs:
+		return a.caDetail()
 	default:
 		return a.certDetail()
 	}
@@ -522,6 +573,16 @@ func (a *app) certDetail() []string {
 			"  matches       "+matchWord(entry.Key))
 		if entry.Key.Note != "" {
 			lines = append(lines, "  "+entry.Key.Note)
+		}
+	}
+
+	if entry.LocalCA != "" || entry.IssuerUntrusted {
+		lines = append(lines, "", "Issuer")
+		if entry.LocalCA != "" {
+			lines = append(lines, "  local CA      "+entry.LocalCA+"  (screen 5)")
+		}
+		if entry.IssuerUntrusted {
+			lines = append(lines, "  trust         not trusted by this system")
 		}
 	}
 
@@ -703,6 +764,56 @@ func (a *app) liveDetail() []string {
 	return lines
 }
 
+// caDetail shows one local CA in full: its files, whether this machine trusts
+// it, what it signed, and how to take it to another host.
+func (a *app) caDetail() []string {
+	ca, ok := a.selectedCA()
+	if !ok {
+		return []string{"(nothing selected)"}
+	}
+	lines := []string{"Local CA " + ca.Name, "",
+		"  certificate   " + ca.CertPath}
+	if ca.CanIssue {
+		lines = append(lines, "  key           "+ca.KeyPath+"  (mode "+
+			orNone(ca.Key.Mode)+", never read)")
+	} else {
+		lines = append(lines, "  key           not on this machine: it can be "+
+			"trusted here, not issued from")
+	}
+	lines = append(lines, "  trusted here  "+yesNo(ca.Trusted)+"  ("+
+		orNone(a.model.TrustStore)+" trust store)")
+	if ca.Anchor != "" {
+		lines = append(lines, "  anchor        "+ca.Anchor)
+	}
+	lines = append(lines, "  verdict       "+orNone(string(ca.Verdict)))
+	if ca.Unreadable != "" {
+		return append(lines, "", "The certificate could not be read:",
+			"  "+ca.Unreadable)
+	}
+	if len(ca.Findings) > 0 {
+		lines = append(lines, "", "What is worth knowing")
+		for _, finding := range ca.Findings {
+			lines = append(lines, "  "+verdictMark(finding.Verdict)+" "+finding.Message)
+		}
+	}
+	lines = append(lines, "", "Issued ("+strconv.Itoa(len(ca.Issued))+")")
+	if len(ca.Issued) == 0 {
+		lines = append(lines, "  nothing in the inventory was signed by it — press e")
+	}
+	for _, issued := range ca.Issued {
+		lines = append(lines, "  "+issued)
+	}
+	lines = append(lines, "", "Certificate")
+	lines = append(lines, certLines(ca.Cert)...)
+	lines = append(lines, "", "Export")
+	for _, line := range a.exportLines(ca) {
+		lines = append(lines, "  "+line)
+	}
+	lines = append(lines, "",
+		"  e issues from it, x shows the export, t trusts it here, T stops trusting it")
+	return lines
+}
+
 // sourceDetail shows one place or one program.
 func (a *app) sourceDetail() []string {
 	row, ok := a.selectedSource()
@@ -754,6 +865,12 @@ func (a *app) shortHelpKeys() []ui.KeyHint {
 			ui.KeyHint{Key: "C", Desc: "another host"})
 	case screenSources:
 		hints = append(hints, ui.KeyHint{Key: "R", Desc: "re-read"})
+	case screenCAs:
+		hints = append(hints,
+			ui.KeyHint{Key: "N", Desc: "new CA"},
+			ui.KeyHint{Key: "e", Desc: "issue"},
+			ui.KeyHint{Key: "x", Desc: "export"},
+			ui.KeyHint{Key: "t/T", Desc: "trust/untrust"})
 	default:
 		hints = append(hints,
 			ui.KeyHint{Key: "c", Desc: "live check"},
@@ -770,7 +887,7 @@ func (a *app) shortHelpKeys() []ui.KeyHint {
 // helpKeys is the full key list shown on the help screen.
 func helpKeys() []ui.KeyHint {
 	return []ui.KeyHint{
-		{Key: "tab / 1-4", Desc: "certificates, renewal, live, sources"},
+		{Key: "tab / 1-5", Desc: "certificates, renewal, live, sources, CAs"},
 		{Key: "↑/k, ↓/j", Desc: "move the selection, or scroll the detail screen"},
 		{Key: "g / G", Desc: "first / last row"},
 		{Key: "pgup/pgdn", Desc: "scroll a page"},
@@ -785,6 +902,10 @@ func helpKeys() []ui.KeyHint {
 		{Key: "i", Desc: "install the selected pair to a path a server config already names"},
 		{Key: "d", Desc: "rehearse every renewal, writing nothing"},
 		{Key: "F", Desc: "renew the selected certificate now"},
+		{Key: "N", Desc: "create a local certificate authority"},
+		{Key: "e", Desc: "issue a server certificate from the selected CA (DNS and IP names)"},
+		{Key: "x", Desc: "export the selected CA: path, fingerprint, copy command"},
+		{Key: "t / T", Desc: "trust the selected CA on this machine / stop trusting it"},
 		{Key: "R", Desc: "re-read this machine"},
 		{Key: "?", Desc: "this help"},
 		{Key: "q", Desc: "quit"},

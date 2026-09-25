@@ -16,6 +16,12 @@
 //	systemctl    the state of the renewal timer
 //	install      creating the destination directory with its mode
 //	chmod        leaving a generated private key readable only by its owner
+//	chown        handing an issued pair to the account that reads it
+//	tee          appending a local CA's certificate to an issued chain
+//	rm           removing a trust anchor tui-cert itself installed
+//	update-ca-certificates, update-ca-trust, trust
+//	             rebuilding the system trust store after a local CA is
+//	             trusted or untrusted, the way each distribution does it
 //
 // Three more — `cat`, `ls` and `stat` — are the escalated fallbacks for the
 // directories a certificate lives in that an ordinary user cannot open, which
@@ -25,10 +31,12 @@ package pki
 
 import (
 	"context"
-	"crypto/x509"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/user"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -57,6 +65,13 @@ var searchPaths = map[string][]string{
 	"cat":       {"/usr/bin/cat", "/bin/cat"},
 	"ls":        {"/usr/bin/ls", "/bin/ls"},
 	"stat":      {"/usr/bin/stat", "/bin/stat"},
+	"chown":     {"/usr/bin/chown", "/bin/chown"},
+	"tee":       {"/usr/bin/tee", "/bin/tee"},
+	"rm":        {"/usr/bin/rm", "/bin/rm"},
+	BinUpdateCACertificates: {"/usr/sbin/update-ca-certificates",
+		"/sbin/update-ca-certificates", "/usr/bin/update-ca-certificates"},
+	BinUpdateCATrust: {"/usr/bin/update-ca-trust", "/usr/sbin/update-ca-trust"},
+	BinTrust:         {"/usr/bin/trust"},
 }
 
 // certbotTimers are the units a certbot renewal runs from. Which one a machine
@@ -81,6 +96,9 @@ type Options struct {
 	// Home is the user's home directory, where acme.sh usually lives. It is a
 	// field so a test does not depend on whose account it runs under.
 	Home string
+	// CARoot overrides where local CAs live. It is not a configuration key:
+	// it exists so a test can keep its CAs in a temporary directory.
+	CARoot string
 }
 
 // Real reads the certificates on this host. It satisfies certs.Backend.
@@ -96,6 +114,14 @@ type Real struct {
 	cat  *runner.Runner
 	ls   *runner.Runner
 	stat *runner.Runner
+	// The local CA's programs: handing a pair over, completing a chain,
+	// and changing the trust store.
+	chown        *runner.Runner
+	tee          *runner.Runner
+	rm           *runner.Runner
+	updateCACert *runner.Runner
+	updateCATrst *runner.Runner
+	trust        *runner.Runner
 
 	// caps gates what only exists on a new enough backend. It comes from the
 	// manifest, so no version number is written into this file.
@@ -136,6 +162,12 @@ func NewReal(sudoPrefix []string, caps compat.Caps, opts Options) (*Real, error)
 		{"cat", &real.cat, nil},
 		{"ls", &real.ls, nil},
 		{"stat", &real.stat, nil},
+		{"chown", &real.chown, nil},
+		{"tee", &real.tee, nil},
+		{"rm", &real.rm, nil},
+		{BinUpdateCACertificates, &real.updateCACert, nil},
+		{BinUpdateCATrust, &real.updateCATrst, nil},
+		{BinTrust, &real.trust, nil},
 	} {
 		r, err := runner.New(runner.Options{
 			Bin:             spec.bin,
@@ -209,7 +241,62 @@ func (r *Real) Capabilities() certs.Capabilities {
 	default:
 		caps.SupportsCreate = true
 	}
+
+	caps.CARoot = r.caRoot()
+	caps.IssuedRoot = IssuedRoot
+	caps.CAKeyTypes = CAKeyTypes
+	switch {
+	case r.openssl == nil:
+		caps.CAReason = "openssl is not installed, so there is nothing here to " +
+			"create a CA or sign a certificate with"
+	case !r.caps.Has(FeatureReqCA):
+		caps.CAReason = "this openssl has no `req -x509 -CA` (it arrived in " +
+			"OpenSSL 3.0), and tui-cert signs with a CA only through it"
+	case r.install == nil || r.chmod == nil || r.tee == nil:
+		caps.CAReason = "install, chmod and tee are what write a CA's files " +
+			"with their modes, and one of them is not on this machine"
+	default:
+		caps.SupportsCA = true
+	}
+	caps.TrustStore, caps.TrustReason = r.trustStore()
 	return caps
+}
+
+// caRoot is where local CAs live on this machine.
+func (r *Real) caRoot() string {
+	if r.opts.CARoot != "" {
+		return NormalizeDir(r.opts.CARoot)
+	}
+	return CARoot
+}
+
+// trustStore recognises how this machine's trust store is managed. The anchor
+// directory decides between Debian and Fedora rather than the program alone:
+// Arch ships an update-ca-trust too, and has no /etc/pki/ca-trust.
+func (r *Real) trustStore() (string, string) {
+	isDir := func(dir string) bool {
+		info, err := os.Stat(dir)
+		return err == nil && info.IsDir()
+	}
+	switch {
+	case r.updateCACert != nil && isDir(AnchorDirs[TrustDebian]):
+		if r.install == nil || r.rm == nil {
+			return "", "install and rm are what add and remove an anchor, and " +
+				"one of them is not on this machine"
+		}
+		return TrustDebian, ""
+	case r.updateCATrst != nil && isDir(AnchorDirs[TrustFedora]):
+		if r.install == nil || r.rm == nil {
+			return "", "install and rm are what add and remove an anchor, and " +
+				"one of them is not on this machine"
+		}
+		return TrustFedora, ""
+	case r.trust != nil:
+		return TrustArch, ""
+	}
+	return "", "neither update-ca-certificates, update-ca-trust nor trust is " +
+		"here, so tui-cert cannot change this machine's trust store — install " +
+		"the ca-certificates package"
 }
 
 // createDir is where a generated certificate goes: /etc/ssl/tui-cert when this
@@ -269,6 +356,18 @@ func (r *Real) runnerFor(cmd certs.Command) *runner.Runner {
 		return r.install
 	case "chmod":
 		return r.chmod
+	case "chown":
+		return r.chown
+	case "tee":
+		return r.tee
+	case "rm":
+		return r.rm
+	case BinUpdateCACertificates:
+		return r.updateCACert
+	case BinUpdateCATrust:
+		return r.updateCATrst
+	case BinTrust:
+		return r.trust
 	default:
 		return nil
 	}
@@ -284,7 +383,15 @@ func (r *Real) Run(ctx context.Context, cmd certs.Command) (string, error) {
 		}
 		return "", fmt.Errorf("pki: %q is not available on this machine", name)
 	}
-	return run.Run(ctx, cmd)
+	out, err := run.Run(ctx, cmd)
+	if err == nil && (cmd.Argv[0] == "tee" || cmd.Argv[0] == BinOpenSSL) {
+		// tee echoes what it appended, which is a CA certificate, and a
+		// successful `openssl req` prints only its key-generation progress:
+		// neither is anything for the status line. A failure keeps its output,
+		// which is where openssl says why.
+		out = ""
+	}
+	return out, err
 }
 
 // fsFor returns the three reads the scanner makes: a plain one first,
@@ -409,12 +516,15 @@ func (r *Real) Load(ctx context.Context) (certs.Model, error) {
 		model.Hostname = name
 	}
 
-	roots, err := x509.SystemCertPool()
+	fsys := r.fsFor(ctx)
+	// The trust store is read on every load, because a trust change made a
+	// moment ago has to show on the next screen.
+	trust, err := LoadTrust(OSFS().Read)
 	if err != nil {
 		model.RootsError = firstLine(err.Error())
 	}
+	roots := trust.Pool
 
-	fsys := r.fsFor(ctx)
 	found, references, locations := Scan(fsys, scanLocations(r.home()),
 		r.opts.ExtraPaths)
 	model.Locations = locations
@@ -425,6 +535,12 @@ func (r *Real) Load(ctx context.Context) (certs.Model, error) {
 	}
 	certs.SortEntries(model.Entries)
 	model.Destinations = Destinations(references)
+
+	model.TrustStore, _ = r.trustStore()
+	cas, location := LoadCAs(fsys, r.caRoot(), trust, model.TrustStore, now)
+	model.Locations = append(model.Locations, location)
+	model.Entries, model.CAs = AttachIssuers(fsys, model.Entries, cas, now,
+		model.Hostname)
 
 	model.ACME = r.loadACME(ctx)
 	model.Tools = r.loadTools(ctx)
@@ -668,4 +784,113 @@ func (r *Real) existingFile(req certs.CreateRequest) string {
 		}
 	}
 	return ""
+}
+
+// BuildCreateCA renders the commands that create a local CA.
+func (r *Real) BuildCreateCA(_ certs.Model, req certs.CARequest) (
+	certs.CAPlan, error) {
+	caps := r.Capabilities()
+	if !caps.SupportsCA {
+		return certs.CAPlan{}, fmt.Errorf("%s", caps.CAReason)
+	}
+	existing := ""
+	if CheckCAName(req.Name) == nil {
+		dir, certPath, keyPath := caPaths(r.caRoot(), req.Name)
+		for _, candidate := range []string{certPath, keyPath} {
+			if _, err := os.Stat(candidate); err == nil {
+				existing = candidate
+				break
+			}
+		}
+		if existing == "" {
+			if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+				existing = dir
+			}
+		}
+	}
+	return BuildCreateCA(req, r.caRoot(), NewSerial(), existing)
+}
+
+// BuildIssue renders the commands that sign a server certificate with a local
+// CA, reading the CA's certificate for the chain and checking that the owner
+// is an account this machine has.
+func (r *Real) BuildIssue(model certs.Model, req certs.IssueRequest) (
+	certs.IssuePlan, error) {
+	caps := r.Capabilities()
+	if !caps.SupportsCA {
+		return certs.IssuePlan{}, fmt.Errorf("%s", caps.CAReason)
+	}
+	ca, ok := model.CA(req.CA)
+	if !ok {
+		return certs.IssuePlan{}, fmt.Errorf("there is no local CA named %q", req.CA)
+	}
+	if req.Owner != "" {
+		if err := CheckOwner(req.Owner); err != nil {
+			return certs.IssuePlan{}, err
+		}
+		if err := lookupOwner(req.Owner); err != nil {
+			return certs.IssuePlan{}, err
+		}
+		if r.chown == nil {
+			return certs.IssuePlan{}, fmt.Errorf("chown is not on this machine, "+
+				"so the pair cannot be handed to %s", req.Owner)
+		}
+	}
+	caPEM, err := r.fsFor(context.Background()).Read(ca.CertPath)
+	if err != nil {
+		return certs.IssuePlan{}, fmt.Errorf("%s: %s", ca.CertPath,
+			firstLine(err.Error()))
+	}
+	dir := IssueDir(req)
+	input := IssueInput{CA: ca, CAPEM: caPEM, Serial: NewSerial(), Now: r.now()}
+	if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
+		input.DirExists = true
+	}
+	for _, candidate := range []string{path.Join(dir, ChainFile),
+		path.Join(dir, PrivKeyFile)} {
+		if _, statErr := os.Stat(candidate); statErr == nil {
+			input.Existing = candidate
+			break
+		}
+	}
+	return BuildIssue(req, input)
+}
+
+// BuildTrust renders the commands that put a local CA into this machine's
+// trust store, or take it out.
+func (r *Real) BuildTrust(model certs.Model, name string, trust bool) (
+	certs.TrustPlan, error) {
+	ca, ok := model.CA(name)
+	if !ok {
+		return certs.TrustPlan{}, fmt.Errorf("there is no local CA named %q", name)
+	}
+	store, reason := r.trustStore()
+	if store == "" {
+		return certs.TrustPlan{}, fmt.Errorf("%s", reason)
+	}
+	return BuildTrust(ca, store, trust)
+}
+
+// lookupOwner checks that the owner names an account and a group this
+// machine has, so a typo is refused in the form rather than by chown after
+// the key was written. The lookup is Go's own reading of /etc/passwd and
+// /etc/group; an account only a directory service knows is let through for
+// chown to judge.
+func lookupOwner(owner string) error {
+	name, group, _ := strings.Cut(owner, ":")
+	if _, err := user.Lookup(name); err != nil {
+		var unknown user.UnknownUserError
+		if errors.As(err, &unknown) {
+			return fmt.Errorf("there is no account named %q on this machine", name)
+		}
+	}
+	if group != "" {
+		if _, err := user.LookupGroup(group); err != nil {
+			var unknown user.UnknownGroupError
+			if errors.As(err, &unknown) {
+				return fmt.Errorf("there is no group named %q on this machine", group)
+			}
+		}
+	}
+	return nil
 }
