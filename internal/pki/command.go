@@ -140,6 +140,44 @@ func SubjectFor(commonName string) (string, error) {
 	return "/CN=" + commonName, nil
 }
 
+// SANNames is the list of names a certificate will carry, in the order it
+// carries them: the common name first, then the extra names as typed, with
+// empty entries and duplicates dropped. A DNS name is compared without regard
+// to case and an IP address by its canonical form, because `Host.example` and
+// `host.example`, or `::1` and `0::1`, are the same name to every client. Each
+// entry keeps the spelling it was first typed with.
+//
+// It is the one normalisation: the review dialog shows this list and the
+// `subjectAltName=` argument is rendered from it, so what the reader approves
+// is what goes into the certificate.
+func SANNames(commonName string, sans []string) ([]string, error) {
+	names := append([]string{commonName}, sans...)
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if err := CheckName(name); err != nil {
+			return nil, err
+		}
+		key := strings.ToLower(name)
+		if addr, err := netip.ParseAddr(name); err == nil {
+			key = addr.String()
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("pki: a certificate needs at least one name")
+	}
+	return out, nil
+}
+
 // SANValueFor renders the `-addext subjectAltName=` argument.
 //
 // The common name is always the first entry. A certificate whose CN is not
@@ -147,26 +185,17 @@ func SubjectFor(commonName string) (string, error) {
 // 2017, and generating one would be generating a certificate that does not
 // work.
 func SANValueFor(commonName string, sans []string) (string, error) {
-	names := append([]string{commonName}, sans...)
-	seen := map[string]bool{}
-	var entries []string
+	names, err := SANNames(commonName, sans)
+	if err != nil {
+		return "", err
+	}
+	entries := make([]string, 0, len(names))
 	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" || seen[name] {
-			continue
-		}
-		if err := CheckName(name); err != nil {
-			return "", err
-		}
-		seen[name] = true
 		if IsIP(name) {
 			entries = append(entries, "IP:"+name)
 			continue
 		}
 		entries = append(entries, "DNS:"+name)
-	}
-	if len(entries) == 0 {
-		return "", fmt.Errorf("pki: a certificate needs at least one name")
 	}
 	return "subjectAltName=" + strings.Join(entries, ","), nil
 }
@@ -259,6 +288,7 @@ func BuildCreate(req certs.CreateRequest, existing string) (certs.CreatePlan, er
 	if err != nil {
 		return certs.CreatePlan{}, err
 	}
+	names, _ := SANNames(req.CommonName, req.SANs)
 	newKey, err := keyArgs(req.KeyType)
 	if err != nil {
 		return certs.CreatePlan{}, err
@@ -270,6 +300,7 @@ func BuildCreate(req certs.CreateRequest, existing string) (certs.CreatePlan, er
 		KeyPath:  keyPath,
 		Subject:  subject,
 		SANValue: sanValue,
+		Names:    names,
 		Existing: existing,
 	}
 

@@ -118,12 +118,12 @@ func (a *app) openIssueForm() tea.Cmd {
 func (a *app) submitCA() tea.Cmd {
 	request, err := a.form.caRequest()
 	if err != nil {
-		a.setStatus(ui.StatusError, err.Error())
+		a.refuseForm(err.Error())
 		return nil
 	}
 	created, err := a.backend.BuildCreateCA(a.model, request)
 	if err != nil {
-		a.setStatus(ui.StatusError, err.Error())
+		a.refuseForm(err.Error())
 		return nil
 	}
 	title := "Create the CA " + request.Name
@@ -145,12 +145,12 @@ func (a *app) submitCA() tea.Cmd {
 func (a *app) submitIssue() tea.Cmd {
 	request, err := a.form.issueRequest()
 	if err != nil {
-		a.setStatus(ui.StatusError, err.Error())
+		a.refuseForm(err.Error())
 		return nil
 	}
 	issued, err := a.backend.BuildIssue(a.model, request)
 	if err != nil {
-		a.setStatus(ui.StatusError, err.Error())
+		a.refuseForm(err.Error())
 		return nil
 	}
 	title := "Issue " + request.CommonName + " from " + request.CA
@@ -161,7 +161,8 @@ func (a *app) submitIssue() tea.Cmd {
 	parts := []string{
 		"This writes:\n  " + issued.ChainPath + "  (0644: the certificate, then " +
 			issued.CA + "'s)\n  " + issued.KeyPath + "  (0600, never shown)",
-		"Owned by " + owner + ". Subject " + issued.Subject + "\n" + issued.SANValue,
+		"Owned by " + owner + ". Subject " + issued.Subject + "\n" +
+			namesBody(issued.Names),
 	}
 	if issued.Warning != "" {
 		parts = append(parts, issued.Warning)

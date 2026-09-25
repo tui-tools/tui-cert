@@ -825,10 +825,7 @@ func (r *Real) BuildIssue(model certs.Model, req certs.IssueRequest) (
 		return certs.IssuePlan{}, fmt.Errorf("there is no local CA named %q", req.CA)
 	}
 	if req.Owner != "" {
-		if err := CheckOwner(req.Owner); err != nil {
-			return certs.IssuePlan{}, err
-		}
-		if err := lookupOwner(req.Owner); err != nil {
+		if err := r.LookupOwner(req.Owner); err != nil {
 			return certs.IssuePlan{}, err
 		}
 		if r.chown == nil {
@@ -871,26 +868,48 @@ func (r *Real) BuildTrust(model certs.Model, name string, trust bool) (
 	return BuildTrust(ca, store, trust)
 }
 
-// lookupOwner checks that the owner names an account and a group this
-// machine has, so a typo is refused in the form rather than by chown after
-// the key was written. The lookup is Go's own reading of /etc/passwd and
-// /etc/group; an account only a directory service knows is let through for
-// chown to judge.
-func lookupOwner(owner string) error {
-	name, group, _ := strings.Cut(owner, ":")
-	if _, err := user.Lookup(name); err != nil {
-		var unknown user.UnknownUserError
-		if errors.As(err, &unknown) {
-			return fmt.Errorf("there is no account named %q on this machine", name)
-		}
+// LookupOwner checks an owner the way the issue form needs it checked while
+// the reader is still in it: its spelling, then that the account and the group
+// exist here. An empty owner is valid: the pair stays with root.
+func (r *Real) LookupOwner(owner string) error {
+	if err := CheckOwner(owner); err != nil || owner == "" {
+		return err
 	}
-	if group != "" {
-		if _, err := user.LookupGroup(group); err != nil {
+	return lookupOwner(owner)
+}
+
+// lookupOwner checks that the owner names an account and a group this
+// machine has, so a typo, or the account of a service whose package is not
+// installed yet, is refused in the form rather than by chown after the key was
+// written. The lookup is Go's own reading of /etc/passwd and /etc/group; an
+// account only a directory service knows is let through for chown to judge.
+func lookupOwner(owner string) error {
+	return ownerMissing(owner,
+		func(name string) bool {
+			_, err := user.Lookup(name)
+			var unknown user.UnknownUserError
+			return !errors.As(err, &unknown)
+		},
+		func(group string) bool {
+			_, err := user.LookupGroup(group)
 			var unknown user.UnknownGroupError
-			if errors.As(err, &unknown) {
-				return fmt.Errorf("there is no group named %q on this machine", group)
-			}
-		}
+			return !errors.As(err, &unknown)
+		})
+}
+
+// ownerMissing is the refusal both backends give for an owner this machine
+// does not have. hasUser and hasGroup answer false only when the account or
+// the group is known not to exist.
+func ownerMissing(owner string, hasUser, hasGroup func(string) bool) error {
+	name, group, _ := strings.Cut(owner, ":")
+	if !hasUser(name) {
+		return fmt.Errorf("there is no account named %q on this machine; "+
+			"create it first (installing the service's package usually does), "+
+			"or leave Owner empty for root", name)
+	}
+	if group != "" && !hasGroup(group) {
+		return fmt.Errorf("there is no group named %q on this machine; "+
+			"create it first, or give only the account", group)
 	}
 	return nil
 }

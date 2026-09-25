@@ -328,6 +328,7 @@ func BuildIssue(req certs.IssueRequest, in IssueInput) (certs.IssuePlan, error) 
 	if err != nil {
 		return certs.IssuePlan{}, err
 	}
+	names, _ := SANNames(strings.TrimSpace(req.CommonName), req.SANs)
 	newKey, err := keyArgs(req.KeyType)
 	if err != nil {
 		return certs.IssuePlan{}, err
@@ -405,6 +406,7 @@ func BuildIssue(req certs.IssueRequest, in IssueInput) (certs.IssuePlan, error) 
 		KeyPath:   keyPath,
 		Subject:   subject,
 		SANValue:  sanValue,
+		Names:     names,
 		Owner:     req.Owner,
 		Existing:  in.Existing,
 		Commands:  commands,

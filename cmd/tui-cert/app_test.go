@@ -296,7 +296,7 @@ func TestGeneratingACertificateIsThreePreviewedCommands(t *testing.T) {
 	}
 	// The names it will carry are on the dialog, because a certificate for the
 	// wrong name is the mistake this form exists to prevent.
-	if !strings.Contains(a.confirm.Body, "subjectAltName=DNS:test.example.com") {
+	if !strings.Contains(a.confirm.Body, "DNS test.example.com (common name)") {
 		t.Errorf("the dialog does not show the names:\n%s", a.confirm.Body)
 	}
 	if !strings.Contains(a.confirm.Body, "trusted by nothing") {

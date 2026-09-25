@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/tui-tools/tui-cert/internal/certs"
 	"github.com/tui-tools/tui-cert/internal/pki"
 	"github.com/tui-tools/tui-kit/theme"
@@ -65,6 +67,29 @@ type formField struct {
 	// options is the closed set of values, nil for a free-text field.
 	options []string
 	help    string
+	// placeholder is the format shown, muted, while the field is empty, so the
+	// reader sees what a field takes without having to select it first.
+	placeholder string
+	// unit is shown, muted, after a non-empty value: "397" alone does not say
+	// what it counts.
+	unit string
+}
+
+// The formats the empty fields show. They are the same words in every form a
+// field appears in, because it is the same parser behind all of them.
+const (
+	placeholderSANs  = "DNS names or IPs, comma or space separated"
+	placeholderOwner = "user:group (empty = root)"
+	unitDays         = "days"
+	// helpSANs is the "Other names" help, minus the sentence a form adds.
+	helpSANs = "Extra names, DNS names or IP addresses, separated by commas " +
+		"or spaces. The common name is always the first; duplicates are dropped."
+)
+
+// daysPlaceholder is what an empty validity field shows: its default, with
+// the unit.
+func daysPlaceholder(days int) string {
+	return strconv.Itoa(days) + " " + unitDays
 }
 
 // choice reports whether the field is one the picker serves.
@@ -87,6 +112,12 @@ type createForm struct {
 	// dir is remembered separately so the header can say where the pair lands
 	// without reading a field the reader may be halfway through editing.
 	defaultDir string
+	// issuedRoot is where an issued pair goes when Into is left empty, so the
+	// empty field can show the path it stands for.
+	issuedRoot string
+	// err is the last refusal, shown inside the dialog: the status line is
+	// hidden behind it, and a refusal nobody sees is a dialog that does nothing.
+	err string
 }
 
 // newCreateForm builds the generator, seeded from the machine's own name —
@@ -121,15 +152,16 @@ func newCreateForm(kind certs.CreateKind, caps certs.Capabilities,
 		{key: fieldName, label: "Common name",
 			help: "The name this is for. It becomes the subject and the first " +
 				"subject alternative name."},
-		{key: fieldSANs, label: "Other names",
-			help: "Space-separated extra names, DNS or IP. Leave empty for one name."},
+		{key: fieldSANs, label: "Other names", placeholder: placeholderSANs,
+			help: helpSANs + " Leave empty for one name."},
 		{key: fieldKeyType, label: "Key", options: keyTypes,
 			help: "ec:prime256v1 is what every certificate authority now issues " +
 				"by default. Choose RSA only for something old that needs it."},
-		{key: fieldDays, label: "Valid for",
+		{key: fieldDays, label: "Valid for", unit: unitDays,
+			placeholder: daysPlaceholder(days),
 			help: "Days. 825 is the longest a public certificate was ever " +
 				"allowed to be, which makes it the longest a client will like."},
-		{key: fieldDir, label: "Into",
+		{key: fieldDir, label: "Into", placeholder: caps.CreateDir,
 			help: "The directory the pair is written to. It is created with " +
 				"mode 700, and the key is left at 600."},
 	}
@@ -221,7 +253,8 @@ func newCAForm(caps certs.Capabilities, hostname string) createForm {
 		{key: fieldKeyType, label: "Key", options: keyTypes,
 			help: "ec:prime256v1 is what every current client speaks. rsa:3072 " +
 				"for the old one that does not."},
-		{key: fieldDays, label: "Valid for",
+		{key: fieldDays, label: "Valid for", unit: unitDays,
+			placeholder: daysPlaceholder(pki.DefaultCADays),
 			help: "Days. 3650 is ten years: the CA is what every client has to " +
 				"be told to trust, so it should outlast what it signs."},
 	}
@@ -245,7 +278,8 @@ func newIssueForm(caps certs.Capabilities, cas []string, current,
 		root = pki.IssuedRoot
 	}
 	f := createForm{
-		kind: formIssue,
+		kind:       formIssue,
+		issuedRoot: root,
 		values: map[string]string{
 			fieldCA:      current,
 			fieldName:    hostname,
@@ -263,20 +297,21 @@ func newIssueForm(caps certs.Capabilities, cas []string, current,
 		{key: fieldName, label: "Common name",
 			help: "The name this is for. It becomes the subject and the first " +
 				"subject alternative name; an IP address works too."},
-		{key: fieldSANs, label: "Other names",
-			help: "Space-separated extra names: DNS names, and IP addresses for " +
-				"a server reached by address. Each is checked."},
+		{key: fieldSANs, label: "Other names", placeholder: placeholderSANs,
+			help: helpSANs + " Each is checked."},
 		{key: fieldKeyType, label: "Key", options: keyTypes,
 			help: "ec:prime256v1 unless a client needs RSA."},
-		{key: fieldDays, label: "Valid for",
+		{key: fieldDays, label: "Valid for", unit: unitDays,
+			placeholder: daysPlaceholder(pki.DefaultIssueDays),
 			help: "Days. 397 is the longest a browser accepts; it can never be " +
 				"longer than the CA has left."},
 		{key: fieldDir, label: "Into",
 			help: "The directory for fullchain.pem and privkey.pem. Empty is " +
 				root + "/<common name>, which tui-cert lists."},
-		{key: fieldOwner, label: "Owner",
+		{key: fieldOwner, label: "Owner", placeholder: placeholderOwner,
 			help: "user or user:group of the service that reads the pair, e.g. " +
-				"headscale:headscale. Empty leaves it with root."},
+				"headscale:headscale. It must exist on this machine. Empty " +
+				"leaves it with root."},
 	}
 	f.input = textinput.New()
 	f.input.CharLimit = 300
@@ -371,6 +406,26 @@ func (f *createForm) prev() {
 	count := len(f.visible())
 	f.active = (f.active + count - 1) % count
 	f.focusActive()
+}
+
+// liveValue is a field's value as the reader sees it now: the text box for the
+// field being edited, which is only saved when the cursor leaves it.
+func (f createForm) liveValue(key string) string {
+	if field := f.current(); field.key == key && !field.choice() {
+		return f.input.Value()
+	}
+	return f.values[key]
+}
+
+// placeholderFor is what an empty field shows. Into on the issue form stands
+// for a path that depends on the common name, so it is worked out here rather
+// than fixed when the form opens.
+func (f createForm) placeholderFor(field formField) string {
+	if f.kind == formIssue && field.key == fieldDir {
+		return path.Join(f.issuedRoot,
+			pki.FileStem(strings.TrimSpace(f.liveValue(fieldName))))
+	}
+	return field.placeholder
 }
 
 // activeIsChoice reports whether the active field is one the picker serves.
@@ -548,7 +603,9 @@ func (f createForm) footnote() string {
 func (f createForm) view(t theme.Theme, width, height int) string {
 	inner := min(max(width-8, 34), 76)
 	labelWidth := min(12, max(inner-16, 8))
-	valueWidth := max(inner-labelWidth-6, 10)
+	// A row is the marker, the label, two spaces and the value, inside the
+	// dialog's padding of two cells a side; a value one cell wider wraps.
+	valueWidth := max(inner-labelWidth-8, 10)
 
 	lines := []string{t.Title.Render(ui.Truncate(f.title(), inner-4)), ""}
 
@@ -560,12 +617,9 @@ func (f createForm) view(t theme.Theme, width, height int) string {
 		case field.choice():
 			value = renderChoice(t, f.values[field.key], i == f.active, valueWidth)
 		case i == f.active:
-			input := f.input
-			input.Width = valueWidth - 2
-			value = input.View()
+			value = f.activeView(t, field, valueWidth)
 		default:
-			value = t.Base.Render(ui.Truncate(orPlaceholder(f.values[field.key]),
-				valueWidth))
+			value = f.fieldView(t, field, valueWidth)
 		}
 		marker := "  "
 		if i == f.active {
@@ -574,6 +628,9 @@ func (f createForm) view(t theme.Theme, width, height int) string {
 		lines = append(lines, marker+label+"  "+value)
 	}
 
+	if f.err != "" {
+		lines = append(lines, "", t.Danger.Render(f.err))
+	}
 	if help := f.current().help; help != "" {
 		lines = append(lines, "", t.Muted.Render(help))
 	}
@@ -588,6 +645,39 @@ func (f createForm) view(t theme.Theme, width, height int) string {
 
 	box := t.Dialog.Width(inner).Render(strings.Join(lines, "\n"))
 	return placeCenter(box, width, height)
+}
+
+// fieldView draws a text field that is not being edited: its value with its
+// unit, or, when empty, the format it takes.
+func (f createForm) fieldView(t theme.Theme, field formField, width int) string {
+	value := strings.TrimSpace(f.values[field.key])
+	if value == "" {
+		return t.Muted.Render(ui.Truncate(orPlaceholder(f.placeholderFor(field)),
+			width))
+	}
+	if field.unit == "" {
+		return t.Base.Render(ui.Truncate(value, width))
+	}
+	value = ui.Truncate(value, max(width-len(field.unit)-1, 1))
+	return t.Base.Render(value) + t.Muted.Render(" "+field.unit)
+}
+
+// activeView draws the text box of the field being edited, with the format as
+// its placeholder and the unit after it.
+func (f createForm) activeView(t theme.Theme, field formField, width int) string {
+	input := f.input
+	input.Placeholder = f.placeholderFor(field)
+	input.PlaceholderStyle = t.Muted
+	input.Width = width - 2
+	if field.unit == "" || input.Value() == "" {
+		return input.View()
+	}
+	// The box is as wide as what is typed, so the unit sits right after it.
+	// The text box always ends in one cell of its own (the cursor, or the
+	// space after the cursor), which is the space before the unit.
+	input.Width = min(max(lipgloss.Width(input.Value()), 1),
+		max(width-3-len(field.unit), 1))
+	return input.View() + t.Muted.Render(field.unit)
 }
 
 // orPlaceholder renders an empty value as something visible, so a blank row is

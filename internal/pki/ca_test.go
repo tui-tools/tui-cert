@@ -507,3 +507,36 @@ func hasFinding(findings []certs.Finding, kind string) bool {
 	}
 	return false
 }
+
+func TestSANNamesNormalises(t *testing.T) {
+	got, err := SANNames("host.example", []string{"Host.Example", " ", "10.0.0.5",
+		"www.example", "10.0.0.5", "::1", "0:0::1"})
+	if err != nil {
+		t.Fatalf("SANNames: %v", err)
+	}
+	want := []string{"host.example", "10.0.0.5", "www.example", "::1"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("SANNames = %v, want %v", got, want)
+	}
+	if _, err := SANNames("host.example", []string{"not a name"}); err == nil {
+		t.Errorf("an invalid name was accepted")
+	}
+}
+
+func TestLookupOwnerAgainstThisMachine(t *testing.T) {
+	r := &Real{}
+	for _, owner := range []string{"", "root", "root:root"} {
+		if err := r.LookupOwner(owner); err != nil {
+			t.Errorf("LookupOwner(%q) = %v", owner, err)
+		}
+	}
+	for owner, want := range map[string]string{
+		"tuicertnosuchuser":       `no account named "tuicertnosuchuser"`,
+		"root:tuicertnosuchgrp":   `no group named "tuicertnosuchgrp"`,
+		"--reference=/etc/shadow": "is not an owner",
+	} {
+		if err := r.LookupOwner(owner); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("LookupOwner(%q) = %v, want %q", owner, err, want)
+		}
+	}
+}
