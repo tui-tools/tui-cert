@@ -405,15 +405,13 @@ func (a *app) openExportFile() tea.Cmd {
 		Start:      a.pickerHome,
 		NewFile:    true,
 		Extensions: []string{".crt", ".pem", ".cer"},
+		// The suggested file opens in the focused path field, so enter
+		// alone accepts it and esc goes back to the listing.
+		InitialPath: path.Join(a.pickerHome, ca.Name+".crt"),
 	})
-	// A paste lands in the picker's path field, which is the one way into it
-	// with a value already there.
-	suggestion := path.Join(a.filePicker.Dir, ca.Name+".crt")
-	cmd, _ := a.filePicker.Update(tea.KeyMsg{Type: tea.KeyRunes,
-		Runes: []rune(suggestion), Paste: true})
 	a.filePickerFor = fileExport
 	a.mode = modeFilePicker
-	return cmd
+	return nil
 }
 
 // handleFilePicker resolves the file picker: an export target or an import
