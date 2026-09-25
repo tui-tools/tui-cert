@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"testing/fstest"
 	"time"
 
 	"github.com/tui-tools/tui-cert/internal/certs"
@@ -47,6 +48,10 @@ type Fake struct {
 	// authorities are the sample machine's local CAs, by certificate path, so
 	// an issuance can sign with the key the real one would have used.
 	authorities map[string]demoAuthority
+	// anchors is how many local CAs the sample trust store held at the last
+	// rebuild of it, so update-ca-certificates can report what it added and
+	// removed the way the real one does.
+	anchors int
 }
 
 // demoAuthority is one local CA on the sample machine, key included: the key
@@ -66,6 +71,15 @@ const (
 // demoHostname is the sample machine's name, which is what the host name
 // finding is measured against.
 const demoHostname = "web01.example.com"
+
+// DemoHome is the sample machine's home directory, where the file picker
+// starts and where a CA certificate from another host is waiting to be
+// imported.
+const DemoHome = "/home/ana"
+
+// demoPartnerCA is a CA made on another machine, whose certificate somebody
+// copied into the home directory: what the import from a file reads.
+const demoPartnerCA = "partner-ca"
 
 // NewFake builds the sample machine: seven certificates in the states a real
 // one is found in — one healthy, one that a renewal has quietly stopped
@@ -190,6 +204,12 @@ func (f *Fake) reset() {
 		[]string{"nas.example.internal"}, in(200),
 		local, localKey, true, true)
 
+	// 10. A CA certificate brought from another host, not imported yet.
+	partner, _ := f.authority(demoPartnerCA, "Partner Lab", nil, nil)
+	f.write(demoFile{path: path.Join(DemoHome, demoPartnerCA+".crt"), mode: 0o644,
+		body: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: partner.Raw})})
+
+	f.anchors = f.anchorCount()
 	f.rebuild()
 }
 
@@ -240,6 +260,18 @@ func (f *Fake) localAuthority(name string, notBefore, notAfter time.Time) (
 	f.write(demoFile{path: keyPath, mode: 0o600, body: pemKey(key)})
 	f.authorities[certPath] = demoAuthority{cert: cert, key: key}
 	return cert, key
+}
+
+// anchorCount is how many local CAs the sample trust store holds.
+func (f *Fake) anchorCount() int {
+	count := 0
+	for certPath := range f.authorities {
+		name := path.Base(path.Dir(certPath))
+		if _, ok := f.files[AnchorPath(demoTrustStore, name)]; ok {
+			count++
+		}
+	}
+	return count
 }
 
 // trustSet is the sample machine's trust store: the demo's public root, plus
@@ -594,6 +626,9 @@ func (f *Fake) Ran() []certs.Command { return f.run.Ran }
 // keys are pressed.
 func (f *Fake) apply(cmd certs.Command) (string, error) {
 	argv := cmd.Argv
+	if len(argv) == 1 && argv[0] == BinUpdateCACertificates {
+		return f.updateTrust(), nil
+	}
 	if len(argv) < 2 {
 		return "", nil
 	}
@@ -605,6 +640,8 @@ func (f *Fake) apply(cmd certs.Command) (string, error) {
 		return f.createAuthority(argv)
 	case argv[0] == BinOpenSSL && argv[1] == "req":
 		return f.generate(argv)
+	case argv[0] == "tee" && len(argv) == 2:
+		return f.writeCA(argv[1], cmd.Stdin)
 	case argv[0] == "tee" && len(argv) == 3 && argv[1] == "-a":
 		f.files[argv[2]] = append(append([]byte{}, f.files[argv[2]]...),
 			[]byte(cmd.Stdin)...)
@@ -627,9 +664,6 @@ func (f *Fake) apply(cmd certs.Command) (string, error) {
 		delete(f.modes, argv[len(argv)-1])
 		f.rebuild()
 		return "", nil
-	case argv[0] == BinUpdateCACertificates:
-		f.rebuild()
-		return "Updating certificates in /etc/ssl/certs...\ndone.", nil
 	case argv[0] == BinCertbot && contains(argv, "--dry-run"):
 		return "Congratulations, all simulated renewals succeeded.", nil
 	case argv[0] == BinCertbot && contains(argv, "--force-renewal"):
@@ -641,6 +675,34 @@ func (f *Fake) apply(cmd certs.Command) (string, error) {
 	case argv[0] == "systemctl" && argv[1] == "reload":
 		return "", nil
 	}
+	return "", nil
+}
+
+// updateTrust is update-ca-certificates on the sample machine, output and
+// all: the progress line first and the hooks after, which is what the status
+// line must not mistake for the result.
+func (f *Fake) updateTrust() string {
+	now := f.anchorCount()
+	added, removed := max(now-f.anchors, 0), max(f.anchors-now, 0)
+	f.anchors = now
+	f.rebuild()
+	return fmt.Sprintf("Updating certificates in /etc/ssl/certs...\n"+
+		"%d added, %d removed; done.\n"+
+		"Running hooks in /etc/ca-certificates/update.d...\ndone.",
+		added, removed)
+}
+
+// writeCA writes the file `tee` would have, which on the sample machine is
+// only ever an imported CA certificate: it is kept, and registered as an
+// authority with no key, so `t` can trust it and nothing can issue from it.
+func (f *Fake) writeCA(file, body string) (string, error) {
+	f.write(demoFile{path: file, mode: 0o644, body: []byte(body)})
+	if block, _ := pem.Decode([]byte(body)); block != nil {
+		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+			f.authorities[file] = demoAuthority{cert: cert}
+		}
+	}
+	f.rebuild()
 	return "", nil
 }
 
@@ -874,6 +936,62 @@ func (f *Fake) BuildCreateCA(_ certs.Model, req certs.CARequest) (
 		}
 	}
 	return BuildCreateCA(req, CARoot, NewSerial(), existing)
+}
+
+// BuildExportCA renders the same command the real backend renders, onto the
+// sample machine's files.
+func (f *Fake) BuildExportCA(model certs.Model, name, dest string) (
+	certs.ExportPlan, error) {
+	ca, ok := model.CA(name)
+	if !ok {
+		return certs.ExportPlan{}, fmt.Errorf("there is no local CA named %q", name)
+	}
+	_, existing := f.files[dest]
+	return BuildExportCA(ca, dest, existing)
+}
+
+// ReadImport reads a file of the sample machine.
+func (f *Fake) ReadImport(file string) ([]byte, error) {
+	body, ok := f.files[file]
+	if !ok {
+		return nil, fmt.Errorf("%s: no such file or directory", file)
+	}
+	if len(body) > MaxImportBytes {
+		return nil, fmt.Errorf("%s is %d bytes; a CA certificate is a few "+
+			"kilobytes at most", file, len(body))
+	}
+	return body, nil
+}
+
+// BuildImportCA renders the same plan the real backend renders, refusing a
+// name the sample machine already has a CA under.
+func (f *Fake) BuildImportCA(model certs.Model, req certs.ImportRequest) (
+	certs.ImportPlan, error) {
+	existing := ""
+	if CheckCAName(req.Name) == nil {
+		dir, _, _ := caPaths(CARoot, req.Name)
+		for name := range f.files {
+			if strings.HasPrefix(name, dir+"/") {
+				existing = dir
+				break
+			}
+		}
+	}
+	return BuildImportCA(req, CARoot, existing, model.CAs, f.now())
+}
+
+// PickerFS is the sample machine's files as the file picker browses them, so
+// --demo and its screenshots never list the machine they run on.
+func (f *Fake) PickerFS() fs.FS {
+	tree := fstest.MapFS{
+		strings.TrimPrefix(DemoHome, "/"): &fstest.MapFile{Mode: fs.ModeDir | 0o755},
+		"tmp":                             &fstest.MapFile{Mode: fs.ModeDir | 0o1777},
+	}
+	for name, body := range f.files {
+		tree[strings.TrimPrefix(name, "/")] = &fstest.MapFile{Data: body,
+			Mode: f.modes[name]}
+	}
+	return tree
 }
 
 // demoAccounts are the sample machine's accounts, each with a group of the

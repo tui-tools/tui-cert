@@ -348,3 +348,52 @@ func FuzzBuildInstall(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseCAPEM is the import: a paste or a file somebody brought from
+// another host. Whatever it holds, the parser either refuses it or returns
+// exactly one CA certificate re-encoded as one clean PEM block — and a refusal
+// never carries the input back, which could be a private key.
+func FuzzParseCAPEM(f *testing.F) {
+	now := time.Now()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		f.Fatalf("key: %v", err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(7),
+		Subject: pkix.Name{CommonName: "fuzz-ca"}, NotBefore: now.AddDate(-1, 0, 0),
+		NotAfter: now.AddDate(5, 0, 0), IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign}
+	der, err := x509.CreateCertificate(rand.Reader, template, template,
+		&key.PublicKey, key)
+	if err != nil {
+		f.Fatalf("certificate: %v", err)
+	}
+	block := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	f.Add(block)
+	f.Add(strings.ReplaceAll(block, "\n", " "))
+	f.Add("│ " + strings.ReplaceAll(block, "\n", " │\n│ "))
+	f.Add(block + block)
+	f.Add(block[:len(block)/2])
+	f.Add(string(der))
+	f.Add(pemBegin + "\n" + pemEnd)
+	f.Add("")
+	f.Fuzz(func(t *testing.T, input string) {
+		cert, clean, err := ParseCAPEM([]byte(input), now)
+		if err != nil {
+			// Longer than any literal the messages quote.
+			if len(input) > 64 && strings.Contains(err.Error(), input) {
+				t.Fatalf("the refusal echoes the input: %v", err)
+			}
+			return
+		}
+		if !cert.IsCA {
+			t.Fatalf("a certificate that is not a CA was accepted")
+		}
+		rest := clean
+		block, rest := pem.Decode(rest)
+		if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 ||
+			string(block.Bytes) != string(cert.Raw) {
+			t.Fatalf("the re-encoding is not one clean block: %q", clean)
+		}
+	})
+}

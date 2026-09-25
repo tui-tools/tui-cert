@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -56,16 +58,35 @@ const (
 	modePicker
 	modeForm
 	modeHelp
-	// modeExport shows how to take a local CA's certificate to another host.
-	// It changes nothing, so it is a panel rather than a confirm dialog.
+	// modeExport shows how to take a local CA's certificate to another host:
+	// the PEM itself, and the commands. It changes nothing by itself, so it is
+	// a page rather than a confirm dialog; w on it writes the certificate to a
+	// file, through a confirm dialog like every other change.
 	modeExport
+	// modeFilePicker chooses a path: where an export is written, or which
+	// file an import reads.
+	modeFilePicker
 )
 
-// The two things a text prompt is ever opened for.
+// The things a text prompt is ever opened for.
 const (
 	promptFilter = "filter"
 	promptLive   = "live"
+	// promptImport takes a pasted CA certificate.
+	promptImport = "import"
 )
+
+// The two things the file picker is ever opened for.
+const (
+	fileExport = "export"
+	fileImport = "import"
+)
+
+// pickerImportSource is the picker that asks where an imported CA comes from,
+// and importSources its two answers, in the order it offers them.
+const pickerImportSource = "\x00import-source"
+
+var importSources = []string{"paste the PEM", "read a file"}
 
 // pickerInstall is the one picker that is not filling a form field: it chooses
 // which server configuration's pair of paths a certificate is installed to.
@@ -116,8 +137,20 @@ type app struct {
 	// installTo the destinations it is choosing between, in the order shown.
 	installFrom certs.Entry
 	installTo   []certs.Destination
-	// exporting is the CA the export panel is showing.
-	exporting certs.CA
+	// exporting is the CA the export page is showing, and exportOffset how far
+	// it is scrolled.
+	exporting    certs.CA
+	exportOffset int
+	// filePicker is the open file picker, and filePickerFor what it is for.
+	filePicker    ui.FilePicker
+	filePickerFor string
+	// pickerFS is what the file picker browses: nil for this machine's own
+	// files, the sample machine's under --demo. pickerHome is where it starts.
+	pickerFS   ui.FileSystem
+	pickerHome string
+	// importPEM is the CA certificate being imported, as pasted or read, kept
+	// between the name form and the review.
+	importPEM []byte
 
 	status     string
 	statusKind ui.StatusKind
@@ -147,7 +180,22 @@ type ranMsg struct {
 	title  string
 	output string
 	err    error
+	// report is how a success is summed up in the status line.
+	report statusReport
 }
+
+// statusReport is how a plan that succeeded is summed up in the status line.
+type statusReport int
+
+const (
+	// The zero value shows the first line the commands printed, or "done";
+	// every plan that does not say otherwise gets it.
+	_ statusReport = iota
+	// reportDone shows "done", with the trust store's count when it printed
+	// one: the output of a trust change is progress, and it is only worth
+	// reading when the change failed.
+	reportDone
+)
 
 // plan is what a confirm dialog is holding: one or more commands, run in
 // order. A renewal is a single command; generating a certificate is three, and
@@ -155,6 +203,7 @@ type ranMsg struct {
 type plan struct {
 	title    string
 	commands []certs.Command
+	report   statusReport
 }
 
 // newApp builds the model around a backend.
@@ -171,6 +220,14 @@ func newApp(backend certs.Backend, th theme.Theme,
 	}
 	if th.Warning != "" {
 		a.setStatus(ui.StatusWarn, th.Warning)
+	}
+	// The demo backend has files of its own for the picker to browse, so
+	// --demo and its screenshots never list the machine they run on.
+	if demo, ok := backend.(interface{ PickerFS() fs.FS }); ok {
+		a.pickerFS = ui.FileSystemFromFS(demo.PickerFS())
+		a.pickerHome = pki.DemoHome
+	} else if home, err := os.UserHomeDir(); err == nil {
+		a.pickerHome = home
 	}
 	return a
 }
@@ -216,13 +273,14 @@ func (a *app) run(p plan) tea.Cmd {
 		for _, cmd := range p.commands {
 			out, err := backend.Run(ctx, cmd)
 			if err != nil {
-				return ranMsg{title: p.title, output: out, err: err}
+				return ranMsg{title: p.title, output: out, err: err, report: p.report}
 			}
 			if trimmed := strings.TrimSpace(out); trimmed != "" {
 				outputs = append(outputs, trimmed)
 			}
 		}
-		return ranMsg{title: p.title, output: strings.Join(outputs, "; ")}
+		return ranMsg{title: p.title, output: strings.Join(outputs, "; "),
+			report: p.report}
 	}
 }
 
@@ -281,7 +339,10 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, a.load()
 		}
 		summary := strings.TrimSpace(msg.output)
-		if summary == "" {
+		switch {
+		case msg.report == reportDone:
+			summary = pki.TrustSummary(summary)
+		case summary == "":
 			summary = "done"
 		}
 		a.setStatusf(ui.StatusOK, "%s: %s", msg.title, firstLine(summary))
@@ -299,6 +360,10 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if a.mode == modeForm {
 		return a, a.form.updateActive(msg)
+	}
+	if a.mode == modeFilePicker {
+		cmd, _ := a.filePicker.Update(msg)
+		return a, cmd
 	}
 	return a, nil
 }
@@ -335,9 +400,13 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handlePicker(msg)
 	case modeForm:
 		return a.handleForm(msg)
-	case modeHelp, modeExport:
+	case modeHelp:
 		a.mode = modeBrowse
 		return a, nil
+	case modeExport:
+		return a.handleExportKey(msg)
+	case modeFilePicker:
+		return a.handleFilePicker(msg)
 	case modeDetail:
 		return a.handleDetailKey(msg)
 	default:
@@ -367,6 +436,15 @@ func (a *app) handleConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleInput resolves the text prompt, which serves the filter and the live
 // check.
 func (a *app) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.promptFor == promptImport && msg.Type == tea.KeyEnter &&
+		pemIncomplete(a.input.Model.Value()) {
+		// A paste the terminal did not bracket arrives as lines, each ending
+		// in enter. Until the END line is in, enter is a line break, which the
+		// parser reads as the space it is.
+		a.input.Model.SetValue(a.input.Model.Value() + " ")
+		a.input.Model.CursorEnd()
+		return a, nil
+	}
 	cmd, _ := a.input.Update(msg)
 	if !a.input.Done {
 		if a.promptFor == promptFilter {
@@ -379,6 +457,14 @@ func (a *app) handleInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	accepted, value := a.input.Accepted, strings.TrimSpace(a.input.Value())
 	prompt := a.promptFor
 	a.mode, a.promptFor = modeBrowse, ""
+
+	if prompt == promptImport {
+		if !accepted || value == "" {
+			a.setStatus(ui.StatusInfo, "cancelled")
+			return a, nil
+		}
+		return a, a.importFrom([]byte(value), "")
+	}
 
 	if prompt == promptLive {
 		if !accepted || value == "" {
@@ -414,6 +500,18 @@ func (a *app) handlePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	choice, accepted := a.picker.Selected(), a.picker.Accepted
 	cursor, field := a.picker.Cursor, a.pickerFor
 	a.picker, a.pickerFor = ui.Picker{}, ""
+
+	if field == pickerImportSource {
+		a.mode = modeBrowse
+		if !accepted {
+			a.setStatus(ui.StatusInfo, "cancelled")
+			return a, nil
+		}
+		if choice == importSources[0] {
+			return a, a.openImportPaste("", "")
+		}
+		return a, a.openImportFile()
+	}
 
 	if field == pickerInstall {
 		a.mode = modeBrowse
@@ -578,6 +676,8 @@ func (a *app) submitForm() tea.Cmd {
 		return a.submitCA()
 	case formIssue:
 		return a.submitIssue()
+	case formImport:
+		return a.submitImport()
 	}
 	request, err := a.form.request()
 	if err != nil {
@@ -782,6 +882,8 @@ func (a *app) handleActionKey(msg tea.KeyMsg) tea.Cmd {
 		return a.openIssueForm()
 	case "x":
 		return a.openExport()
+	case "X":
+		return a.openImport()
 	case "t":
 		return a.confirmTrust(true)
 	case "T":

@@ -455,10 +455,14 @@ comma or space separated, each checked, and an address goes in as `IP:`), a
 validity of 397 days by default and never past the CA's own expiry, a
 directory, and the **owner**: the account of the service that reads the pair.
 An empty field shows the format it takes, and an empty directory the path it
-stands for. The owner has to exist on this machine: an account or a group that
-does not (a service whose package is not installed yet) is refused in the
-dialog, not by `chown` after the key was written. The review lists the names
-the certificate will carry, common name first and duplicates dropped.
+stands for. A named owner has to exist on this machine: an account or a group
+that does not (a service whose package is not installed yet) is refused in the
+dialog, not by `chown` after the key was written. A service in a container
+reads its files as the uid it has there, which the host may not know at all
+(Keycloak in a rootful podman container is uid 1000): give the numeric
+`uid:gid`, say `1000:1000`, and it is checked as numbers, looked up nowhere,
+and previewed as `uid 1000, gid 1000`. The review lists the names the
+certificate will carry, common name first and duplicates dropped.
 
 ```
 openssl req -x509 -CA /etc/tui-cert/ca/homelab-ca/ca.crt \
@@ -486,17 +490,44 @@ inventory; one somewhere else is listed once you add it to `paths`. Every
 certificate list row then names the CA that signed it, and flags an issuer this
 machine does not trust.
 
-**`x` exports it.** The path, the SHA-256 fingerprint, and the one line to run
-on the other host, which copies only the certificate to the same place there:
+![Exporting a local CA](docs/screenshots/tui-cert-export.png)
+
+**`x` exports it.** The export page prints the certificate itself, as PEM at
+the left edge of the terminal with nothing around it, so selecting it copies a
+block that `openssl` and `X` on the other host both read. Under it: the path,
+the SHA-256 fingerprint on two lines so it is never cut, and the ssh route for
+a host that can reach this one by name. `w` there writes the certificate to a
+file you pick, for `scp` or a USB stick, and only the certificate:
+
+```
+install -m 644 /etc/tui-cert/ca/homelab-ca/ca.crt /home/ana/homelab-ca.crt
+```
+
+![Importing a CA from a file](docs/screenshots/tui-cert-import.png)
+
+**`X` imports one** on the other host: paste the PEM, or pick the file. The
+paste may have lost its line breaks, or kept the border of the panel it was
+copied from; only the base64 between the BEGIN and END lines counts, and it
+must decode to exactly one CA certificate that has not expired. A private key
+in the paste is refused and dropped on the spot. The form offers the CA's own
+name, shows its subject, fingerprint and expiry, and the review writes it as
+certificate-only, the clean re-encoding and not the paste:
+
+```
+install -d -m 755 /etc/tui-cert/ca/homelab-ca
+tee /etc/tui-cert/ca/homelab-ca/ca.crt
+chmod 644 /etc/tui-cert/ca/homelab-ca/ca.crt
+```
+
+A CA name already there, or the same certificate under another name, is
+refused. Compare the fingerprint with the export page before `t`: the
+certificate you trust can sign for any name. With ssh from the other host
+instead:
 
 ```
 ssh web01.example.com cat /etc/tui-cert/ca/homelab-ca/ca.crt \
   | sudo install -D -m 644 /dev/stdin /etc/tui-cert/ca/homelab-ca/ca.crt
 ```
-
-tui-cert on that host then lists the CA as certificate-only, and `t` there
-trusts it. Compare the fingerprint first: `openssl x509 -noout -fingerprint
--sha256 -in` the file.
 
 **`t` trusts it on this host, `T` stops trusting it**, each distribution its own
 way:
@@ -507,8 +538,10 @@ way:
 | Fedora, RHEL | `install -m 644 ca.crt /etc/pki/ca-trust/source/anchors/tui-cert-<name>.crt`, `update-ca-trust extract` | `rm -f -- <that file>`, `update-ca-trust extract` |
 | Arch | `trust anchor --store ca.crt` | `trust anchor --remove ca.crt` |
 
-The anchor's name starts with `tui-cert-`, and an untrust removes only that
-file: a CA the distribution ships, or one somebody added by hand, is never
+The status line says `done` when the store's command exits 0, with
+`update-ca-certificates`' count when it prints one (`done (1 added, 0
+removed)`); its output is shown only when it fails. The anchor's name starts
+with `tui-cert-`, and an untrust removes only that file: a CA the distribution ships, or one somebody added by hand, is never
 touched. Whether a CA is trusted is read from the system bundle on every load,
 so the screen changes the moment the store does.
 
@@ -643,6 +676,8 @@ Every one of these is previewed and confirmed first.
 | `i` | `install -m 644 <crt> <dst>`, `install -m 600 <key> <dst>`, then `systemctl reload nginx` or `httpd` |
 | `N` | `install -d -m 755 /etc/tui-cert/ca/<name>`, `openssl req -x509 …`, `chmod 600` the key, `chmod 644` the certificate |
 | `e` | `install -d -m 755 <dir>` when it is missing, `openssl req -x509 -CA …`, `tee -a <dir>/fullchain.pem`, two `chmod`, and `chown <owner>` when one is given |
+| `x`, then `w` | `install -m 644 /etc/tui-cert/ca/<name>/ca.crt <file you picked>` |
+| `X` | `install -d -m 755 /etc/tui-cert/ca/<name>`, `tee /etc/tui-cert/ca/<name>/ca.crt` with the re-encoded certificate on standard input, `chmod 644` it |
 | `t` / `T` | the trust store's own commands, in [the table above](#a-local-ca); `rm -f` only ever removes the `tui-cert-` anchor a trust installed |
 
 Nothing else. There is no other code path that writes a file, and every path
@@ -670,14 +705,18 @@ configuration.
 | `F` | Renew the selected certificate now |
 | `N` | Create a local certificate authority |
 | `e` | Issue a server certificate from the selected CA |
-| `x` | Export the selected CA: path, fingerprint, copy command |
+| `x` | Export the selected CA: its PEM, fingerprint, copy command; `w` writes it to a file |
+| `X` | Import a CA certificate from another host: pasted, or from a file |
 | `t` / `T` | Trust the selected CA on this machine / stop trusting it |
 | `R` | Re-read this machine |
 | `?` | Help |
 | `q` | Quit |
 
-In the **generator**: `tab` moves between fields, `←`/`→` cycles a choice,
+In the **forms**: `tab` moves between fields, `←`/`→` cycles a choice,
 `space` opens the list, `enter` builds the plan and shows it, `esc` cancels.
+A field that already holds a value, such as the CA name `<host>-ca`, is
+selected when the cursor lands on it, so typing replaces it and backspace
+clears it; `ctrl+u` clears a field wherever the cursor is.
 
 ![Help](docs/screenshots/tui-cert-help.png)
 
@@ -710,15 +749,17 @@ In the **generator**: `tab` moves between fields, `←`/`→` cycles a choice,
 - Install a certificate and its key to the paths an nginx or Apache
   configuration already names, at 644 and 600, and reload that server.
 - Run a local certificate authority: create one, issue server certificates for
-  DNS names and IP addresses owned by the account that reads them, export it,
-  and trust or untrust it on Debian, Fedora and Arch.
+  DNS names and IP addresses owned by the account (or the container uid) that
+  reads them, export it as PEM or to a file, import one from another host, and
+  trust or untrust it on Debian, Fedora and Arch.
 - Follow the active Omarchy theme, and respect `NO_COLOR`.
 
 ## What v0.1 cannot do
 
-- **No certificate is ever deleted, moved or rewritten.** The only thing written
-  is a new pair, into a directory you chose. The one removal is `T`, and what it
-  removes is the trust anchor `t` installed.
+- **No certificate is ever deleted, moved or rewritten.** What is written is
+  new: a pair, a CA, an imported CA certificate, or an exported copy at a path
+  you picked (the review says so when that path already holds a file). The one
+  removal is `T`, and what it removes is the trust anchor `t` installed.
 - **No revocation check.** The OCSP and CRL endpoints are shown; nothing is
   fetched from them. A live check reports whether a response was *stapled*,
   which is a fact about the handshake rather than a query.

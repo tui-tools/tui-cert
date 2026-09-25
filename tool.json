@@ -40,6 +40,14 @@
       "caption": "Local CAs: when each expires, whether this machine trusts it, and what it signed"
     },
     {
+      "path": "docs/screenshots/tui-cert-export.png",
+      "caption": "Exporting a local CA: the PEM to paste on the other host, and its fingerprint"
+    },
+    {
+      "path": "docs/screenshots/tui-cert-import.png",
+      "caption": "Importing a CA from another host: its fingerprint on the form where it is named"
+    },
+    {
       "path": "docs/screenshots/tui-cert-help.png",
       "caption": "The help screen, generated from the same key table as the hint bar"
     }
@@ -95,7 +103,11 @@
     },
     {
       "key": "x",
-      "action": "Export the selected CA: its path, SHA-256 fingerprint and a one-line copy command"
+      "action": "Export the selected CA: its PEM, fingerprint and copy command; w writes a file"
+    },
+    {
+      "key": "X",
+      "action": "Import a CA certificate from another host, pasted as PEM or read from a file"
     },
     {
       "key": "t / T",

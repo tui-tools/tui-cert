@@ -49,6 +49,8 @@ func (a *app) View() string {
 		return a.detailView()
 	case modeExport:
 		return a.exportView()
+	case modeFilePicker:
+		return a.filePicker.View(a.theme, a.width, a.height)
 	}
 	return a.browseView()
 }
@@ -97,7 +99,7 @@ func (a *app) emptyMessage() string {
 	case screenSources:
 		return "nothing was searched, which should not happen"
 	case screenCAs:
-		return "no local certificate authority on this machine — press N to create one"
+		return "no local certificate authority on this machine — press N to create one, X to import one"
 	default:
 		return a.noCertificatesMessage()
 	}
@@ -810,7 +812,8 @@ func (a *app) caDetail() []string {
 		lines = append(lines, "  "+line)
 	}
 	lines = append(lines, "",
-		"  e issues from it, x shows the export, t trusts it here, T stops trusting it")
+		"  e issues from it, x shows the export (w there writes a file), t trusts it",
+		"  here, T stops trusting it; X imports a CA from another host")
 	return lines
 }
 
@@ -869,7 +872,7 @@ func (a *app) shortHelpKeys() []ui.KeyHint {
 		hints = append(hints,
 			ui.KeyHint{Key: "N", Desc: "new CA"},
 			ui.KeyHint{Key: "e", Desc: "issue"},
-			ui.KeyHint{Key: "x", Desc: "export"},
+			ui.KeyHint{Key: "x/X", Desc: "export/import"},
 			ui.KeyHint{Key: "t/T", Desc: "trust/untrust"})
 	default:
 		hints = append(hints,
@@ -904,12 +907,14 @@ func helpKeys() []ui.KeyHint {
 		{Key: "F", Desc: "renew the selected certificate now"},
 		{Key: "N", Desc: "create a local certificate authority"},
 		{Key: "e", Desc: "issue a server certificate from the selected CA (DNS and IP names)"},
-		{Key: "x", Desc: "export the selected CA: path, fingerprint, copy command"},
+		{Key: "x", Desc: "export the selected CA: its PEM, fingerprint, copy command; w writes it to a file"},
+		{Key: "X", Desc: "import a CA certificate from another host, pasted or from a file"},
 		{Key: "t / T", Desc: "trust the selected CA on this machine / stop trusting it"},
 		{Key: "R", Desc: "re-read this machine"},
 		{Key: "?", Desc: "this help"},
 		{Key: "q", Desc: "quit"},
 		{Key: "", Desc: ""},
+		{Key: "ctrl+u", Desc: "in a form: clear the field (a prefilled value is selected: typing replaces it)"},
 		{Key: "note", Desc: "every change is previewed and confirmed first"},
 		{Key: "note", Desc: "reading is done in Go; nothing is shelled out to"},
 		{Key: "note", Desc: "a private key is never read through sudo"},
