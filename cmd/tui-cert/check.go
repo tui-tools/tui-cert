@@ -41,6 +41,34 @@ type certReport struct {
 	Findings []string `json:"findings,omitempty"`
 	// Unreadable is why there is nothing else, when there is nothing else.
 	Unreadable string `json:"unreadable,omitempty"`
+	// LocalCA names the local CA that signed this certificate, and
+	// IssuerUntrusted flags an issuer this machine's trust store lacks.
+	LocalCA         string `json:"localCA,omitempty"`
+	IssuerUntrusted bool   `json:"issuerUntrusted,omitempty"`
+}
+
+// caReport is one local certificate authority, flattened for a script — and
+// for another tool: tui-tailscale reads this block to find a CA to point a
+// server at. Only public facts are here, and the only paths are the CA's own
+// under /etc/tui-cert/ca.
+type caReport struct {
+	Name        string `json:"name"`
+	CertPath    string `json:"certPath"`
+	Subject     string `json:"subject,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	NotAfter    string `json:"notAfter,omitempty"`
+	DaysLeft    int    `json:"daysLeft"`
+	KeyType     string `json:"keyType,omitempty"`
+	// CanIssue reports that ca.key is on this machine.
+	CanIssue bool `json:"canIssue"`
+	// Trusted reports that the system trust store holds this certificate.
+	Trusted bool `json:"trusted"`
+	// Issued counts the inventory's certificates this CA signed; each of those
+	// rows carries "localCA" with this name.
+	Issued     int           `json:"issued"`
+	Verdict    certs.Verdict `json:"verdict"`
+	Findings   []string      `json:"findings,omitempty"`
+	Unreadable string        `json:"unreadable,omitempty"`
 }
 
 // acmeReport is one certificate client, flattened the same way.
@@ -86,6 +114,11 @@ type checkReport struct {
 	Certs []certReport `json:"certs"`
 	// ACME is the certificate clients and their timers.
 	ACME []acmeReport `json:"acme"`
+	// LocalCAs counts the local certificate authorities, CAs lists them, and
+	// TrustStore names how this machine's trust store is managed.
+	LocalCAs   int        `json:"localCAs"`
+	CAs        []caReport `json:"cas"`
+	TrustStore string     `json:"trustStore"`
 	// Tools reports which optional programs are installed.
 	Tools []certs.Tool `json:"tools"`
 	// Locations is where the scan looked and what it could not open.
@@ -149,6 +182,9 @@ func runCheck(backend certs.Backend, backendCompat compat.Result,
 			Verdict:    entry.Verdict,
 			UsedBy:     entry.UsedBy(),
 			Unreadable: entry.Unreadable,
+			LocalCA:    entry.LocalCA,
+
+			IssuerUntrusted: entry.IssuerUntrusted,
 		}
 		if leaf, ok := entry.Leaf(); ok {
 			row.Subject = leaf.Subject
@@ -181,6 +217,32 @@ func runCheck(backend certs.Backend, backendCompat compat.Result,
 			Certificates: len(client.Certificates),
 			Unavailable:  client.Unavailable,
 		})
+	}
+
+	report.LocalCAs = len(model.CAs)
+	report.TrustStore = model.TrustStore
+	report.CAs = make([]caReport, 0, len(model.CAs))
+	for _, ca := range model.CAs {
+		row := caReport{
+			Name:       ca.Name,
+			CertPath:   ca.CertPath,
+			CanIssue:   ca.CanIssue,
+			Trusted:    ca.Trusted,
+			Issued:     len(ca.Issued),
+			Verdict:    ca.Verdict,
+			Unreadable: ca.Unreadable,
+		}
+		if ca.Unreadable == "" {
+			row.Subject = ca.Cert.Subject
+			row.Fingerprint = ca.Cert.Fingerprint
+			row.NotAfter = ca.Cert.NotAfter.Format(time.RFC3339)
+			row.DaysLeft = ca.Cert.DaysLeft
+			row.KeyType = ca.Cert.KeyType
+		}
+		for _, finding := range ca.Findings {
+			row.Findings = append(row.Findings, finding.Kind)
+		}
+		report.CAs = append(report.CAs, row)
 	}
 
 	encoder := json.NewEncoder(out)

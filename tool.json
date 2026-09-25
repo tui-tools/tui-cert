@@ -3,7 +3,7 @@
   "name": "tui-cert",
   "binary": "tui-cert",
   "tagline": "Every certificate on the machine, and what will stop working when",
-  "description": "A terminal UI for the TLS certificates on this machine. It finds them — the Let's Encrypt tree, /etc/ssl, /etc/pki, the paths an nginx, Apache or Caddy configuration names — and puts them on one screen, worst first: expired, expiring, the ones whose private key is not their key, the ones whose key every account can read.\n\nReading is done in Go. crypto/x509 parses the chain, verifies it against the system trust store and compares the key, so the whole inventory works on a machine with nothing else installed. openssl, certbot and acme.sh are optional, and only used to act.\n\nTwo more screens complete it: what certbot or acme.sh manages and whether its timer is really running, and a live TLS handshake on demand — how a certificate renewed on disk and never reloaded shows itself.\n\nEvery change is previewed as the exact command line. `I` obtains a certificate this machine does not have yet, by webroot or standalone, and requests nothing until the agreement says yes. `i` installs a pair to the paths a server's configuration names — chosen from that list, never typed — at 644 and 600, then reloads it.\n\nRun `tui-cert --demo` for a sample machine with seven certificates in seven states.",
+  "description": "A terminal UI for the TLS certificates on this machine. It finds them — the Let's Encrypt tree, /etc/ssl, /etc/pki, the paths an nginx, Apache or Caddy configuration names — and puts them on one screen, worst first: expired, expiring, the ones whose private key is not their key, the ones whose key every account can read.\n\nReading is done in Go. crypto/x509 parses the chain, verifies it against the system trust store and compares the key, so the whole inventory works on a machine with nothing else installed. openssl, certbot and acme.sh are optional, and only used to act.\n\nMore screens: what certbot or acme.sh manages and whether its timer really runs, a live TLS handshake on demand, and local CAs — create one, issue server certificates for DNS names or IP addresses, trust it on this host.\n\nEvery change is previewed as the exact command line. `I` obtains a certificate by webroot or standalone, and requests nothing until the agreement says yes. `i` installs a pair to the paths a server's configuration names, never typed.\n\nRun `tui-cert --demo` for a sample machine with nine certificates and a local CA.",
   "category": "certificates",
   "homepage": "https://github.com/tui-tools/tui-cert",
   "repo": "https://github.com/tui-tools/tui-cert",
@@ -36,14 +36,18 @@
       "caption": "Generating a self-signed certificate or a signing request, one field at a time"
     },
     {
+      "path": "docs/screenshots/tui-cert-cas.png",
+      "caption": "Local CAs: when each expires, whether this machine trusts it, and what it signed"
+    },
+    {
       "path": "docs/screenshots/tui-cert-help.png",
       "caption": "The help screen, generated from the same key table as the hint bar"
     }
   ],
   "keys": [
     {
-      "key": "tab / 1-4",
-      "action": "Move between certificates, renewal, live checks and sources"
+      "key": "tab / 1-5",
+      "action": "Move between certificates, renewal, live checks, sources and local CAs"
     },
     {
       "key": "enter",
@@ -80,6 +84,22 @@
     {
       "key": "F",
       "action": "Force the selected certificate to renew now, rate limit and all"
+    },
+    {
+      "key": "N",
+      "action": "Create a local certificate authority, previewed before it is written"
+    },
+    {
+      "key": "e",
+      "action": "Issue a server certificate from the selected CA: DNS names, IP addresses, owner"
+    },
+    {
+      "key": "x",
+      "action": "Export the selected CA: its path, SHA-256 fingerprint and a one-line copy command"
+    },
+    {
+      "key": "t / T",
+      "action": "Trust the selected CA on this machine, or stop trusting it"
     },
     {
       "key": "/",
@@ -165,6 +185,10 @@
         {
           "name": "addext",
           "since": "1.1.1"
+        },
+        {
+          "name": "req-ca",
+          "since": "3.0.0"
         }
       ],
       "notes": [
@@ -173,8 +197,12 @@
           "impact": "`openssl req` has no `-addext`, so a subject alternative name cannot be set on the command line; tui-cert will not write an openssl configuration file, so the generate keys say why they are unavailable rather than producing a certificate no client accepts"
         },
         {
+          "range": "<3.0.0",
+          "impact": "`openssl req` cannot sign with a CA (`-CA` arrived in 3.0), and tui-cert signs only through it rather than write an extensions file: the local CA keys say why they are unavailable, and everything else works"
+        },
+        {
           "range": ">=1.1.1",
-          "impact": "openssl is only ever used to generate a key pair; nothing is read with it, so a machine without it loses two keys and keeps every screen"
+          "impact": "openssl is only ever used to generate a key pair or sign one with a local CA; nothing is read with it, so a machine without it loses those keys and keeps every screen"
         }
       ],
       "tested": [
@@ -245,7 +273,7 @@
     }
   },
   "security": {
-    "needs_sudo": "Three reads escalate through `sudo -n`, which never prompts: `ls`, `stat` and `cat`, for the certificate directories an ordinary user cannot open — /etc/letsencrypt and /etc/ssl/private on every distribution. A private key is never read through sudo. Renewing and generating escalate too.",
+    "needs_sudo": "Three reads escalate through `sudo -n`, which never prompts: `ls`, `stat` and `cat`, for the certificate directories an ordinary user cannot open. A private key is never read through sudo. Every change escalates: renewing, generating, a local CA, the trust store.",
     "preview_before_run": true,
     "no_daemon": true,
     "no_network": false,
@@ -274,6 +302,9 @@
     "acme",
     "expiry",
     "tui",
-    "bubbletea"
+    "bubbletea",
+    "ca",
+    "pki",
+    "trust-store"
   ]
 }

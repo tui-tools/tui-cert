@@ -114,7 +114,11 @@ func TestCheckReportsTheState(t *testing.T) {
 		`"tool": "tui-cert"`,
 		`"backend": "pki"`,
 		// The sample machine is the one the README describes.
-		`"certificates": 7`,
+		`"certificates": 9`,
+		`"localCAs": 1`,
+		`"name": "homelab-ca"`,
+		`"localCA": "homelab-ca"`,
+		`"trustStore": "debian"`,
 		`"expired": 1`,
 		`"expiring7": 1`,
 		`"mismatches": 1`,

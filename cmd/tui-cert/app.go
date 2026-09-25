@@ -14,8 +14,8 @@ import (
 	"github.com/tui-tools/tui-kit/ui"
 )
 
-// screen is one of the four views the tool is made of. They are tabs rather
-// than nested screens because they answer four separate questions about the
+// screen is one of the five views the tool is made of. They are tabs rather
+// than nested screens because they answer five separate questions about the
 // same machine, and a reader arrives with one of them already in mind.
 type screen int
 
@@ -24,6 +24,7 @@ const (
 	screenACME
 	screenLive
 	screenSources
+	screenCAs
 	screenCount
 )
 
@@ -36,6 +37,8 @@ func (s screen) title() string {
 		return "live"
 	case screenSources:
 		return "sources"
+	case screenCAs:
+		return "CAs"
 	default:
 		return "certificates"
 	}
@@ -53,6 +56,9 @@ const (
 	modePicker
 	modeForm
 	modeHelp
+	// modeExport shows how to take a local CA's certificate to another host.
+	// It changes nothing, so it is a panel rather than a confirm dialog.
+	modeExport
 )
 
 // The two things a text prompt is ever opened for.
@@ -84,6 +90,7 @@ type app struct {
 	acmeRows []acmeRow
 	liveRows []certs.Live
 	sources  []sourceRow
+	caRows   []certs.CA
 
 	width, height int
 	screen        screen
@@ -109,6 +116,8 @@ type app struct {
 	// installTo the destinations it is choosing between, in the order shown.
 	installFrom certs.Entry
 	installTo   []certs.Destination
+	// exporting is the CA the export panel is showing.
+	exporting certs.CA
 
 	status     string
 	statusKind ui.StatusKind
@@ -326,7 +335,7 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handlePicker(msg)
 	case modeForm:
 		return a.handleForm(msg)
-	case modeHelp:
+	case modeHelp, modeExport:
 		a.mode = modeBrowse
 		return a, nil
 	case modeDetail:
@@ -520,8 +529,13 @@ func (a *app) handleForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // submitForm renders the generation plan and opens the confirm dialog with the
 // files it will write and the commands that write them.
 func (a *app) submitForm() tea.Cmd {
-	if a.form.kind == formObtain {
+	switch a.form.kind {
+	case formObtain:
 		return a.submitObtain()
+	case formCA:
+		return a.submitCA()
+	case formIssue:
+		return a.submitIssue()
 	}
 	request, err := a.form.request()
 	if err != nil {
@@ -647,7 +661,7 @@ func (a *app) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.gotoScreen((a.screen + 1) % screenCount)
 	case "shift+tab", "h", "left":
 		a.gotoScreen((a.screen + screenCount - 1) % screenCount)
-	case "1", "2", "3", "4":
+	case "1", "2", "3", "4", "5":
 		a.gotoScreen(screen(msg.String()[0] - '1'))
 	case "/":
 		a.input = ui.NewInput("Filter "+a.screen.title(), "any column…", a.filter)
@@ -720,6 +734,16 @@ func (a *app) handleActionKey(msg tea.KeyMsg) tea.Cmd {
 		return a.openObtain()
 	case "i":
 		return a.openInstallPicker()
+	case "N":
+		return a.openCAForm()
+	case "e":
+		return a.openIssueForm()
+	case "x":
+		return a.openExport()
+	case "t":
+		return a.confirmTrust(true)
+	case "T":
+		return a.confirmTrust(false)
 	}
 	return nil
 }
@@ -1026,13 +1050,19 @@ func (a *app) applyFilter() {
 			a.sources = append(a.sources, row)
 		}
 	}
+	a.caRows = nil
+	for _, ca := range a.model.CAs {
+		if keep(caHaystack(ca)) {
+			a.caRows = append(a.caRows, ca)
+		}
+	}
 	a.clampCursor()
 }
 
 // entryHaystack is the text the filter matches a certificate against.
 func entryHaystack(entry certs.Entry) string {
 	parts := []string{entry.Path, entry.Source, entry.Unreadable,
-		string(entry.Verdict), entry.UsedBy()}
+		string(entry.Verdict), entry.UsedBy(), entry.IssuerLabel()}
 	for _, cert := range entry.Chain {
 		parts = append(parts, cert.Subject, cert.Issuer, cert.IssuerKind,
 			cert.KeyType, cert.Fingerprint)
@@ -1142,6 +1172,8 @@ func (a *app) rowCount() int {
 		return len(a.liveRows)
 	case screenSources:
 		return len(a.sources)
+	case screenCAs:
+		return len(a.caRows)
 	default:
 		return len(a.entries)
 	}

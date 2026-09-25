@@ -66,7 +66,7 @@ screenshots: build
 	python3 $(KIT)/tools/render-screenshots.py \
 		--bin $(BIN)/$(TOOL) --name $(TOOL) --out docs/screenshots --budget 10 \
 		--screen main= --screen 'detail=\r' --screen renewal=2 \
-		--screen 'live=jc' --screen create=n \
+		--screen 'live=jc' --screen create=n --screen cas=5 \
 		--screen help=?
 
 ## readme: regenerate the generated README sections from tool.json.

@@ -95,6 +95,7 @@ func verifyChain(entry *certs.Entry, chain []*x509.Certificate,
 		var unknown x509.UnknownAuthorityError
 		if errors.As(err, &unknown) && len(entry.Chain) > 0 {
 			entry.Chain[0].IssuerKind = certs.IssuerInternal
+			entry.IssuerUntrusted = true
 		}
 		return
 	}
@@ -187,7 +188,18 @@ func Judge(entry certs.Entry, now time.Time, hostname string) certs.Entry {
 		})
 	}
 
-	if entry.ChainError != "" {
+	if entry.LocalCA != "" && entry.IssuerUntrusted {
+		// The chain stops at a CA this machine made and has not trusted,
+		// which is a more useful sentence than "does not verify".
+		entry.Findings = append(entry.Findings, certs.Finding{
+			Kind:    certs.FindingIssuerUntrusted,
+			Verdict: certs.VerdictWarn,
+			Message: "issued by the local CA " + entry.LocalCA + ", which this " +
+				"machine does not trust: curl and Go programs here refuse it. " +
+				"Press t on screen 5 to trust the CA, and trust it on every " +
+				"client that connects.",
+		})
+	} else if entry.ChainError != "" {
 		entry.Findings = append(entry.Findings, certs.Finding{
 			Kind:    certs.FindingChainIncomplete,
 			Verdict: certs.VerdictWarn,
@@ -197,12 +209,27 @@ func Judge(entry certs.Entry, now time.Time, hostname string) certs.Entry {
 		})
 	}
 
+	if entry.LocalCA != "" && !entry.LocalCANotAfter.IsZero() &&
+		leaf.NotAfter.After(entry.LocalCANotAfter) {
+		entry.Findings = append(entry.Findings, certs.Finding{
+			Kind:    certs.FindingOutlivesCA,
+			Verdict: certs.VerdictWarn,
+			Message: "valid until " + leaf.NotAfter.Format("2006-01-02") +
+				", after the CA " + entry.LocalCA + " that signed it expires on " +
+				entry.LocalCANotAfter.Format("2006-01-02") + ". It stops " +
+				"verifying on that day, whatever its own dates say.",
+		})
+	}
+
 	// The host name check is deliberately narrow. A machine serving somebody
 	// else's name is the ordinary case — a reverse proxy does nothing else —
 	// so a public certificate whose names are not this host's is not a
 	// finding. A certificate somebody made for this machine and got the name
 	// wrong is a different thing, and that is the one this catches.
-	if hostname != "" && privateIssuer(leaf) && !leaf.Covers(hostname) {
+	// A local CA issues for whichever server the names were typed for, so its
+	// certificates are not measured against this machine's name.
+	if hostname != "" && entry.LocalCA == "" && privateIssuer(leaf) &&
+		!leaf.Covers(hostname) {
 		entry.Findings = append(entry.Findings, certs.Finding{
 			Kind:    certs.FindingSANMismatch,
 			Verdict: certs.VerdictWarn,

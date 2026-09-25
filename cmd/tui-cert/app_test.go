@@ -82,8 +82,8 @@ func selectEntry(t *testing.T, a *app, subject string) certs.Entry {
 
 func TestLoadsTheSampleMachine(t *testing.T) {
 	a, _ := newTestApp(t)
-	if len(a.entries) != 7 {
-		t.Fatalf("loaded %d certificates, want the sample machine's 7", len(a.entries))
+	if len(a.entries) != 9 {
+		t.Fatalf("loaded %d certificates, want the sample machine's 9", len(a.entries))
 	}
 	counts := a.model.Count()
 	if counts.Expired != 1 || counts.Expiring7 != 1 || counts.Mismatches != 1 {
