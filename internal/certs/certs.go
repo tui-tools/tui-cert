@@ -755,6 +755,9 @@ type CreatePlan struct {
 	// written.
 	Subject  string
 	SANValue string
+	// Names is the normalised list SANValue was rendered from: the common name
+	// first, duplicates dropped. The review shows it one name per line.
+	Names []string
 	// Warning is the caveat the confirm dialog must show.
 	Warning string
 	// Existing names a file the plan would overwrite, empty when none would
@@ -877,7 +880,10 @@ type IssuePlan struct {
 	KeyPath   string
 	Subject   string
 	SANValue  string
-	Owner     string
+	// Names is the normalised list SANValue was rendered from, as the review
+	// shows it.
+	Names []string
+	Owner string
 	// Existing names a file the plan overwrites, empty when none.
 	Existing string
 	Warning  string
@@ -941,6 +947,10 @@ type Backend interface {
 	// BuildIssue renders the commands that sign a server certificate with a
 	// local CA and hand the pair to the account that reads it.
 	BuildIssue(model Model, req IssueRequest) (IssuePlan, error)
+	// LookupOwner checks an issue form's owner, "user" or "user:group", against
+	// the accounts and groups this machine has, so the form can refuse one
+	// that does not exist before anything is written. Empty is valid.
+	LookupOwner(owner string) error
 	// BuildTrust renders the commands that put a local CA into the system
 	// trust store (trust true) or take it out again.
 	BuildTrust(model Model, name string, trust bool) (TrustPlan, error)

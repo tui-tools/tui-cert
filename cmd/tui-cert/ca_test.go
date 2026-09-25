@@ -251,3 +251,162 @@ func TestHelpListsTheCAKeys(t *testing.T) {
 		}
 	}
 }
+
+// focusField moves the form's cursor onto a field, the way tab would.
+func focusField(t *testing.T, a *app, key string) {
+	t.Helper()
+	for range len(a.form.visible()) {
+		if a.form.activeKey() == key {
+			return
+		}
+		a.form.next()
+	}
+	t.Fatalf("the form has no field %q", key)
+}
+
+// plainView is the screen with the theme's escapes taken out.
+func plainView(a *app) string {
+	var out strings.Builder
+	inEscape := false
+	for _, r := range a.View() {
+		switch {
+		case r == 0x1b:
+			inEscape = true
+		case inEscape && (r == 'm' || r == 'K' || r == 'H'):
+			inEscape = false
+		case inEscape:
+		default:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+// TestCAFormsShowEachFieldsFormat checks that an empty or unfocused field says
+// what it takes — the SAN separators, the unit of the validity, what an empty
+// owner and an empty directory mean — at a narrow and a wide terminal.
+func TestCAFormsShowEachFieldsFormat(t *testing.T) {
+	for _, width := range []int{60, 120} {
+		a, _ := newTestApp(t)
+		a.width, a.height = width, 30
+		gotoScreen(t, a, screenCAs)
+
+		drain(t, a, press(a, "N"))
+		view := plainView(a)
+		if !strings.Contains(view, "3650 days") {
+			t.Errorf("%d cols: the CA's validity has no unit:\n%s", width, view)
+		}
+		// The field being edited keeps the unit after the text box.
+		focusField(t, a, fieldDays)
+		if view := plainView(a); !strings.Contains(view, "3650 days") {
+			t.Errorf("%d cols: the focused validity has no unit:\n%s", width, view)
+		}
+		checkWidth(t, a, "CA form", width)
+		drain(t, a, press(a, "esc"))
+
+		drain(t, a, press(a, "e"))
+		if a.mode != modeForm || a.form.kind != formIssue {
+			t.Fatalf("%d cols: e did not open the issue form", width)
+		}
+		view = plainView(a)
+		into := "/etc/tui-cert/issued/web01.example.com"
+		for _, want := range []string{"397 days", placeholderOwner,
+			placeholderSANs, into} {
+			// A narrow dialog truncates a long format; its start still shows.
+			if width < 100 && len(want) > 30 {
+				want = want[:24]
+			}
+			if !strings.Contains(view, want) {
+				t.Errorf("%d cols: the issue form does not show %q:\n%s", width,
+					want, view)
+			}
+		}
+		if width >= 100 && !strings.Contains(view, "comma or space") {
+			t.Errorf("%d cols: the SAN format does not name both separators", width)
+		}
+		checkWidth(t, a, "issue form", width)
+
+		// Into follows the common name as it is typed.
+		focusField(t, a, fieldName)
+		a.form.input.SetValue("vpn.lan")
+		if view := plainView(a); !strings.Contains(view, "/etc/tui-cert/issued/vpn.lan") {
+			t.Errorf("%d cols: Into does not follow the common name:\n%s", width, view)
+		}
+
+		// The help line of Other names says both separators work.
+		focusField(t, a, fieldSANs)
+		view = plainView(a)
+		if !strings.Contains(view, "commas") || !strings.Contains(view, "spaces") {
+			t.Errorf("%d cols: the Other names help:\n%s", width, view)
+		}
+		checkWidth(t, a, "issue form, Other names focused", width)
+	}
+}
+
+// TestIssueReviewListsTheNormalisedNames types the extra names the way an
+// operator does — commas, a repeat of the common name in another case, an IP —
+// and checks the review shows the list that goes into the certificate.
+func TestIssueReviewListsTheNormalisedNames(t *testing.T) {
+	a, _ := newTestApp(t)
+	gotoScreen(t, a, screenCAs)
+	drain(t, a, press(a, "e"))
+	a.form.values[fieldName] = "vpn.example.internal"
+	a.form.values[fieldSANs] = "VPN.example.internal, 192.0.2.30,vpn  192.0.2.30"
+	a.form.focusActive()
+	drain(t, a, press(a, "enter"))
+	if a.mode != modeConfirm {
+		t.Fatalf("no review opened (status: %s)", a.status)
+	}
+	want := "Names, duplicates dropped:\n" +
+		"  DNS vpn.example.internal (common name)\n" +
+		"  IP 192.0.2.30\n" +
+		"  DNS vpn"
+	if !strings.Contains(a.confirm.Body, want) {
+		t.Errorf("the review names =\n%s\nwant\n%s", a.confirm.Body, want)
+	}
+	if !strings.Contains(a.confirm.Command,
+		"subjectAltName=DNS:vpn.example.internal,IP:192.0.2.30,DNS:vpn ") {
+		t.Errorf("the command does not carry the reviewed list:\n%s",
+			a.confirm.Command)
+	}
+}
+
+// TestIssueRefusesAnOwnerTheMachineDoesNotHave checks that an account that
+// does not exist is refused inside the dialog, on leaving the field and on
+// review, rather than by chown after the key was written.
+func TestIssueRefusesAnOwnerTheMachineDoesNotHave(t *testing.T) {
+	a, backend := newTestApp(t)
+	a.width, a.height = 120, 30
+	gotoScreen(t, a, screenCAs)
+	drain(t, a, press(a, "e"))
+	focusField(t, a, fieldOwner)
+	a.form.input.SetValue("nosuchuser")
+	drain(t, a, press(a, "tab"))
+	reason := `there is no account named "nosuchuser" on this machine`
+	if a.mode != modeForm || !strings.Contains(a.form.err, reason) {
+		t.Fatalf("leaving the owner: mode %v, err %q", a.mode, a.form.err)
+	}
+	if !strings.Contains(plainView(a), reason) {
+		t.Errorf("the refusal is not in the dialog:\n%s", plainView(a))
+	}
+
+	drain(t, a, press(a, "enter"))
+	if a.mode != modeForm || !strings.Contains(a.form.err, reason) {
+		t.Errorf("review with a missing owner: mode %v, err %q", a.mode, a.form.err)
+	}
+	a.form.values[fieldOwner] = "headscale:nogroup"
+	drain(t, a, press(a, "enter"))
+	if a.mode != modeForm || !strings.Contains(a.form.err, `no group named "nogroup"`) {
+		t.Errorf("review with a missing group: mode %v, err %q", a.mode, a.form.err)
+	}
+	if len(backend.Ran()) != 0 {
+		t.Errorf("a command ran anyway")
+	}
+
+	// An existing account goes through, and a key clears the old refusal.
+	a.form.values[fieldOwner] = "www-data"
+	drain(t, a, press(a, "enter"))
+	if a.mode != modeConfirm || !strings.Contains(a.confirm.Body, "Owned by www-data") {
+		t.Errorf("www-data was refused: %q", a.form.err)
+	}
+}

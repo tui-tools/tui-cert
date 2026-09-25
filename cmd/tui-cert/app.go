@@ -488,15 +488,20 @@ func installBody(entry certs.Entry, installed certs.InstallPlan) string {
 
 // handleForm routes keys to the create form.
 func (a *app) handleForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A refusal is about the value it was given, so the next key clears it;
+	// the ones that check again set it back.
+	a.form.err = ""
 	switch msg.String() {
 	case "esc":
 		a.mode = modeBrowse
 		a.setStatus(ui.StatusInfo, "cancelled")
 		return a, nil
 	case "tab", "down":
+		a.checkOwnerOnLeave()
 		a.form.next()
 		return a, nil
 	case "shift+tab", "up":
+		a.checkOwnerOnLeave()
 		a.form.prev()
 		return a, nil
 	case "left":
@@ -526,6 +531,43 @@ func (a *app) handleForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, a.form.updateActive(msg)
 }
 
+// refuseForm says why a form cannot be reviewed, inside the dialog where the
+// reader is looking, and in the status line for after it is closed.
+func (a *app) refuseForm(reason string) {
+	a.setStatus(ui.StatusError, reason)
+	a.form.err = reason
+}
+
+// checkOwnerOnLeave checks the issue form's owner as the cursor leaves it, so
+// an account this machine does not have is refused while the reader is still
+// on the form, not by chown after the key was written.
+func (a *app) checkOwnerOnLeave() {
+	if a.form.kind != formIssue || a.form.activeKey() != fieldOwner {
+		return
+	}
+	if err := a.backend.LookupOwner(strings.TrimSpace(a.form.input.Value())); err != nil {
+		a.refuseForm(err.Error())
+	}
+}
+
+// namesBody lists the names a certificate will carry, one per line and in the
+// order it carries them, so the reader approves exactly that list.
+func namesBody(names []string) string {
+	lines := make([]string, 0, len(names))
+	for i, name := range names {
+		kind := "DNS"
+		if pki.IsIP(name) {
+			kind = "IP"
+		}
+		line := "  " + kind + " " + name
+		if i == 0 {
+			line += " (common name)"
+		}
+		lines = append(lines, line)
+	}
+	return "Names, duplicates dropped:\n" + strings.Join(lines, "\n")
+}
+
 // submitForm renders the generation plan and opens the confirm dialog with the
 // files it will write and the commands that write them.
 func (a *app) submitForm() tea.Cmd {
@@ -539,12 +581,12 @@ func (a *app) submitForm() tea.Cmd {
 	}
 	request, err := a.form.request()
 	if err != nil {
-		a.setStatus(ui.StatusError, err.Error())
+		a.refuseForm(err.Error())
 		return nil
 	}
 	create, err := a.backend.BuildCreate(a.model, request)
 	if err != nil {
-		a.setStatus(ui.StatusError, err.Error())
+		a.refuseForm(err.Error())
 		return nil
 	}
 	title := "Generate " + string(request.Kind) + " for " + request.CommonName
@@ -567,12 +609,12 @@ func (a *app) submitForm() tea.Cmd {
 func (a *app) submitObtain() tea.Cmd {
 	request := a.form.obtainRequest()
 	if len(request.Domains) == 0 {
-		a.setStatus(ui.StatusError, "a certificate needs at least one domain name")
+		a.refuseForm("a certificate needs at least one domain name")
 		return nil
 	}
 	cmd, err := a.backend.BuildObtain(a.model, request)
 	if err != nil {
-		a.setStatus(ui.StatusError, err.Error())
+		a.refuseForm(err.Error())
 		return nil
 	}
 	title := "Obtain a certificate for " + request.Domains[0]
@@ -620,7 +662,7 @@ func createBody(create certs.CreatePlan) string {
 		}
 	}
 	parts = append(parts, "This writes:\n  "+strings.Join(written, "\n  "))
-	parts = append(parts, "Subject "+create.Subject+"\n"+create.SANValue)
+	parts = append(parts, "Subject "+create.Subject+"\n"+namesBody(create.Names))
 	if create.Warning != "" {
 		parts = append(parts, create.Warning)
 	}

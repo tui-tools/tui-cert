@@ -876,6 +876,21 @@ func (f *Fake) BuildCreateCA(_ certs.Model, req certs.CARequest) (
 	return BuildCreateCA(req, CARoot, NewSerial(), existing)
 }
 
+// demoAccounts are the sample machine's accounts, each with a group of the
+// same name. headscale is one because the demo has a pair issued to it.
+var demoAccounts = map[string]bool{"root": true, "www-data": true,
+	"headscale": true, "nobody": true}
+
+// LookupOwner refuses an owner the sample machine has no account or group
+// for, with the words the real backend uses.
+func (f *Fake) LookupOwner(owner string) error {
+	if err := CheckOwner(owner); err != nil || owner == "" {
+		return err
+	}
+	has := func(name string) bool { return demoAccounts[name] }
+	return ownerMissing(owner, has, has)
+}
+
 // BuildIssue renders the same plan the real backend renders, from the sample
 // machine's own files.
 func (f *Fake) BuildIssue(model certs.Model, req certs.IssueRequest) (
@@ -883,6 +898,9 @@ func (f *Fake) BuildIssue(model certs.Model, req certs.IssueRequest) (
 	ca, ok := model.CA(req.CA)
 	if !ok {
 		return certs.IssuePlan{}, fmt.Errorf("there is no local CA named %q", req.CA)
+	}
+	if err := f.LookupOwner(req.Owner); err != nil {
+		return certs.IssuePlan{}, err
 	}
 	dir := IssueDir(req)
 	input := IssueInput{CA: ca, CAPEM: f.files[ca.CertPath], Serial: NewSerial(),

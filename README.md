@@ -133,7 +133,7 @@ Upgrades then arrive with the rest of your system updates.
 ### Any distribution, static binary
 
 ```sh
-curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v0.3.0/tui-cert_0.3.0_linux_amd64.tar.gz | tar -xz tui-cert
+curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v0.3.1/tui-cert_0.3.1_linux_amd64.tar.gz | tar -xz tui-cert
 sudo install -m0755 tui-cert /usr/local/bin/tui-cert
 ```
 
@@ -451,9 +451,14 @@ turn. An existing CA is refused rather than overwritten: a new `ca.key` orphans
 every certificate the old one signed and every client that trusts it.
 
 **`e` issues from it.** A common name, other names (DNS names and IP addresses,
-each checked, and an address goes in as `IP:`), a validity of 397 days by
-default and never past the CA's own expiry, a directory, and the **owner**: the
-account of the service that reads the pair.
+comma or space separated, each checked, and an address goes in as `IP:`), a
+validity of 397 days by default and never past the CA's own expiry, a
+directory, and the **owner**: the account of the service that reads the pair.
+An empty field shows the format it takes, and an empty directory the path it
+stands for. The owner has to exist on this machine: an account or a group that
+does not (a service whose package is not installed yet) is refused in the
+dialog, not by `chown` after the key was written. The review lists the names
+the certificate will carry, common name first and duplicates dropped.
 
 ```
 openssl req -x509 -CA /etc/tui-cert/ca/homelab-ca/ca.crt \
