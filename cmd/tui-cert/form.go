@@ -51,6 +51,8 @@ const (
 	formCA
 	// formIssue signs a server certificate with a local CA.
 	formIssue
+	// formImport names a CA certificate brought from another host.
+	formImport
 )
 
 // The two values the agreement toggle takes. It is a choice field rather than
@@ -79,7 +81,7 @@ type formField struct {
 // field appears in, because it is the same parser behind all of them.
 const (
 	placeholderSANs  = "DNS names or IPs, comma or space separated"
-	placeholderOwner = "user:group (empty = root)"
+	placeholderOwner = "user:group or uid:gid (empty = root)"
 	unitDays         = "days"
 	// helpSANs is the "Other names" help, minus the sentence a form adds.
 	helpSANs = "Extra names, DNS names or IP addresses, separated by commas " +
@@ -118,6 +120,13 @@ type createForm struct {
 	// err is the last refusal, shown inside the dialog: the status line is
 	// hidden behind it, and a refusal nobody sees is a dialog that does nothing.
 	err string
+	// selected reports that the active field's value is selected, the way a
+	// prefilled value is when the cursor lands on it: the first character
+	// typed replaces it, backspace clears it, and a cursor key keeps it.
+	selected bool
+	// info are lines shown above the fields: what the form is about, when
+	// that is not something the reader types (the certificate being imported).
+	info []string
 }
 
 // newCreateForm builds the generator, seeded from the machine's own name —
@@ -310,8 +319,35 @@ func newIssueForm(caps certs.Capabilities, cas []string, current,
 				root + "/<common name>, which tui-cert lists."},
 		{key: fieldOwner, label: "Owner", placeholder: placeholderOwner,
 			help: "user or user:group of the service that reads the pair, e.g. " +
-				"headscale:headscale. It must exist on this machine. Empty " +
-				"leaves it with root."},
+				"headscale:headscale, which must exist on this machine. For a " +
+				"service in a container, the numeric uid:gid it runs as there " +
+				"(1000:1000), taken as is. Empty leaves it with root."},
+	}
+	f.input = textinput.New()
+	f.input.CharLimit = 300
+	f.input.Prompt = ""
+	f.focusActive()
+	return f
+}
+
+// newImportForm names a CA certificate brought from another host. One field:
+// the name it goes under here, offered as the certificate's own common name.
+// What is being imported is shown above it, so the reader checks the
+// fingerprint on the form where they chose the name.
+func newImportForm(caps certs.Capabilities, name string, info []string) createForm {
+	root := caps.CARoot
+	if root == "" {
+		root = pki.CARoot
+	}
+	f := createForm{
+		kind:   formImport,
+		values: map[string]string{fieldName: name},
+		info:   info,
+	}
+	f.fields = []formField{
+		{key: fieldName, label: "Name",
+			help: "The CA's name here: its directory under " + root + ". Letters, " +
+				"digits, dots, dashes and underscores."},
 	}
 	f.input = textinput.New()
 	f.input.CharLimit = 300
@@ -334,7 +370,7 @@ const DefaultWebroot = "/var/www/html"
 // decides that, and offering the field would be offering a value that goes
 // nowhere. The webroot is dropped for a standalone challenge, which has none.
 func (f createForm) visible() []formField {
-	if f.kind == formCA || f.kind == formIssue {
+	if f.kind == formCA || f.kind == formIssue || f.kind == formImport {
 		return f.fields
 	}
 	if f.kind == formObtain {
@@ -373,9 +409,11 @@ func (f createForm) current() formField {
 }
 
 // focusActive loads the active field into the text box, or blurs it for a
-// choice field.
+// choice field. A value already there is selected, so typing replaces it
+// rather than appending to a prefilled name.
 func (f *createForm) focusActive() {
 	field := f.current()
+	f.selected = false
 	if field.choice() || field.key == "" {
 		f.input.Blur()
 		return
@@ -383,6 +421,7 @@ func (f *createForm) focusActive() {
 	f.input.SetValue(f.values[field.key])
 	f.input.Focus()
 	f.input.CursorEnd()
+	f.selected = f.input.Value() != ""
 }
 
 // save writes the text box back into the values before the field changes.
@@ -468,9 +507,28 @@ func (f *createForm) cycle(delta int) {
 }
 
 // updateActive forwards a message to the value field when it is a text box.
+//
+// Two keys are the form's own before the text box sees them: ctrl+u clears
+// the field, wherever the cursor is, and — while the value is selected —
+// typing or pasting replaces it and backspace or delete clears it. Any other
+// key drops the selection and acts on the value as it is.
 func (f *createForm) updateActive(msg tea.Msg) tea.Cmd {
 	if f.current().choice() {
 		return nil
+	}
+	if key, ok := msg.(tea.KeyMsg); ok {
+		selected := f.selected
+		f.selected = false
+		switch {
+		case key.Type == tea.KeyCtrlU:
+			f.input.SetValue("")
+			return nil
+		case selected && (key.Type == tea.KeyBackspace || key.Type == tea.KeyDelete):
+			f.input.SetValue("")
+			return nil
+		case selected && (key.Type == tea.KeyRunes || key.Type == tea.KeySpace):
+			f.input.SetValue("")
+		}
 	}
 	var cmd tea.Cmd
 	f.input, cmd = f.input.Update(msg)
@@ -545,6 +603,17 @@ func (f *createForm) caRequest() (certs.CARequest, error) {
 	return request, nil
 }
 
+// importName is the name the import form collected. What a CA name may be
+// is the backend's rule, checked where the argv is built.
+func (f *createForm) importName() (string, error) {
+	f.save()
+	name := strings.TrimSpace(f.values[fieldName])
+	if name == "" {
+		return "", fmt.Errorf("the CA needs a name here")
+	}
+	return name, nil
+}
+
 // issueRequest is what the issue form collected. What a name, a directory and
 // an owner may be is the backend's rule, checked where the argv is built.
 func (f *createForm) issueRequest() (certs.IssueRequest, error) {
@@ -579,6 +648,8 @@ func (f createForm) title() string {
 		return "Create a local certificate authority"
 	case formIssue:
 		return "Issue a server certificate from " + f.values[fieldCA]
+	case formImport:
+		return "Import a CA certificate"
 	}
 	if f.values[fieldKind] == string(certs.CreateCSR) {
 		return "Generate a certificate signing request"
@@ -595,6 +666,8 @@ func (f createForm) footnote() string {
 		return "The CA key never leaves this machine and is never shown."
 	case formIssue:
 		return "The private key is written at 600 and never shown."
+	case formImport:
+		return "Only the certificate is written: nothing can be issued from it here."
 	}
 	return "The private key never leaves this machine and is never shown."
 }
@@ -608,6 +681,12 @@ func (f createForm) view(t theme.Theme, width, height int) string {
 	valueWidth := max(inner-labelWidth-8, 10)
 
 	lines := []string{t.Title.Render(ui.Truncate(f.title(), inner-4)), ""}
+	for _, line := range f.info {
+		lines = append(lines, t.Base.Render(ui.Truncate(line, inner-4)))
+	}
+	if len(f.info) > 0 {
+		lines = append(lines, "")
+	}
 
 	for i, field := range f.visible() {
 		label := t.Muted.Render(ui.Pad(ui.Truncate(field.label, labelWidth),
@@ -637,14 +716,30 @@ func (f createForm) view(t theme.Theme, width, height int) string {
 	lines = append(lines, "",
 		t.Muted.Render(ui.Truncate(f.footnote(), inner-4)),
 		"",
-		t.Key.Render("tab")+t.KeyDesc.Render(" next  ")+
-			t.Key.Render("←/→")+t.KeyDesc.Render(" change  ")+
-			t.Key.Render("space")+t.KeyDesc.Render(" list  ")+
-			t.Key.Render("enter")+t.KeyDesc.Render(" review  ")+
-			t.Key.Render("esc")+t.KeyDesc.Render(" cancel"))
+		f.hintLine(t))
 
 	box := t.Dialog.Width(inner).Render(strings.Join(lines, "\n"))
 	return placeCenter(box, width, height)
+}
+
+// hintLine is the keys under the form, for the kind of field the cursor is
+// on: a choice field changes with the arrows and lists with space, a text
+// field clears with ctrl+u.
+func (f createForm) hintLine(t theme.Theme) string {
+	hint := func(key, desc string) string {
+		return t.Key.Render(key) + t.KeyDesc.Render(" "+desc+"  ")
+	}
+	line := ""
+	if len(f.visible()) > 1 {
+		line += hint("tab", "next")
+	}
+	if f.activeIsChoice() {
+		line += hint("←/→", "change") + hint("space", "list")
+	} else {
+		line += hint("ctrl+u", "clear")
+	}
+	return line + hint("enter", "review") + t.Key.Render("esc") +
+		t.KeyDesc.Render(" cancel")
 }
 
 // fieldView draws a text field that is not being edited: its value with its
@@ -669,6 +764,16 @@ func (f createForm) activeView(t theme.Theme, field formField, width int) string
 	input.Placeholder = f.placeholderFor(field)
 	input.PlaceholderStyle = t.Muted
 	input.Width = width - 2
+	if f.selected && input.Value() != "" {
+		// A selected value is drawn reversed, the way every text field
+		// shows a selection, so the reader knows typing replaces it.
+		value := t.Base.Reverse(true).Render(ui.Truncate(input.Value(),
+			max(width-3-len(field.unit), 1)))
+		if field.unit == "" {
+			return value
+		}
+		return value + t.Muted.Render(" "+field.unit)
+	}
 	if field.unit == "" || input.Value() == "" {
 		return input.View()
 	}

@@ -161,8 +161,9 @@ func TestExportShowsPathFingerprintAndCopyCommand(t *testing.T) {
 	ca := a.caRows[0]
 	text := strings.Join(a.exportLines(ca), "\n")
 	left, right, _ := strings.Cut(pki.CopyCommand(ca, a.model.Hostname), " | ")
-	for _, want := range []string{ca.CertPath, ca.Cert.Fingerprint,
-		left + " \\\n    | " + right} {
+	// The fingerprint is on two lines, so it is never cut at the edge.
+	for _, want := range []string{ca.CertPath, ca.Cert.Fingerprint[:47],
+		ca.Cert.Fingerprint[48:], left + " \\\n    | " + right} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the export lacks %q", want)
 		}

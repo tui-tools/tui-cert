@@ -868,6 +868,75 @@ func (r *Real) BuildTrust(model certs.Model, name string, trust bool) (
 	return BuildTrust(ca, store, trust)
 }
 
+// BuildExportCA renders the command that copies a local CA's certificate to
+// a file the reader chose.
+func (r *Real) BuildExportCA(model certs.Model, name, dest string) (
+	certs.ExportPlan, error) {
+	ca, ok := model.CA(name)
+	if !ok {
+		return certs.ExportPlan{}, fmt.Errorf("there is no local CA named %q", name)
+	}
+	if r.install == nil {
+		return certs.ExportPlan{}, fmt.Errorf("`install` is not on this " +
+			"machine, and it is what copies the certificate with its mode")
+	}
+	existing := false
+	if info, err := os.Stat(dest); err == nil {
+		if info.IsDir() {
+			return certs.ExportPlan{}, fmt.Errorf("%s is a directory; name the "+
+				"file to write", dest)
+		}
+		existing = true
+	}
+	return BuildExportCA(ca, dest, existing)
+}
+
+// ReadImport reads a file picked as a CA certificate to import. It is a plain
+// read as the user running tui-cert, never escalated: a file only root can
+// read may be a private key, and a private key is never read through sudo.
+func (r *Real) ReadImport(file string) ([]byte, error) {
+	info, err := os.Stat(file)
+	if err != nil {
+		return nil, readableError(err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%s is a directory", file)
+	}
+	if info.Size() > MaxImportBytes {
+		return nil, fmt.Errorf("%s is %d bytes; a CA certificate is a few "+
+			"kilobytes at most", file, info.Size())
+	}
+	raw, err := os.ReadFile(file) //nolint:gosec // the path is the one the reader picked to import, read as the reader and bounded above
+	if err != nil {
+		if os.IsPermission(err) {
+			return nil, fmt.Errorf("%s cannot be read as this user, and "+
+				"tui-cert does not escalate to read a file it was handed: copy "+
+				"the certificate somewhere readable, or paste it", file)
+		}
+		return nil, readableError(err)
+	}
+	return raw, nil
+}
+
+// BuildImportCA renders the commands that install a CA certificate from
+// another host under the CA root, refusing a name already taken.
+func (r *Real) BuildImportCA(model certs.Model, req certs.ImportRequest) (
+	certs.ImportPlan, error) {
+	if r.install == nil || r.tee == nil || r.chmod == nil {
+		return certs.ImportPlan{}, fmt.Errorf("install, tee and chmod are what " +
+			"write the certificate with its mode, and one of them is not on " +
+			"this machine")
+	}
+	existing := ""
+	if CheckCAName(req.Name) == nil {
+		dir, _, _ := caPaths(r.caRoot(), req.Name)
+		if _, err := os.Stat(dir); err == nil {
+			existing = dir
+		}
+	}
+	return BuildImportCA(req, r.caRoot(), existing, model.CAs, r.now())
+}
+
 // LookupOwner checks an owner the way the issue form needs it checked while
 // the reader is still in it: its spelling, then that the account and the group
 // exist here. An empty owner is valid: the pair stays with root.
@@ -900,14 +969,19 @@ func lookupOwner(owner string) error {
 // ownerMissing is the refusal both backends give for an owner this machine
 // does not have. hasUser and hasGroup answer false only when the account or
 // the group is known not to exist.
+//
+// A numeric id is not looked up. It is what a service in a container reads
+// its files as — Keycloak in a rootful podman container is uid 1000 there,
+// whoever uid 1000 is on the host, if anyone — so the host having no account
+// for it is the ordinary case, not a typo.
 func ownerMissing(owner string, hasUser, hasGroup func(string) bool) error {
 	name, group, _ := strings.Cut(owner, ":")
-	if !hasUser(name) {
+	if !isNumericID(name) && !hasUser(name) {
 		return fmt.Errorf("there is no account named %q on this machine; "+
 			"create it first (installing the service's package usually does), "+
 			"or leave Owner empty for root", name)
 	}
-	if group != "" && !hasGroup(group) {
+	if group != "" && !isNumericID(group) && !hasGroup(group) {
 		return fmt.Errorf("there is no group named %q on this machine; "+
 			"create it first, or give only the account", group)
 	}

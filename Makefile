@@ -67,6 +67,7 @@ screenshots: build
 		--bin $(BIN)/$(TOOL) --name $(TOOL) --out docs/screenshots --budget 10 \
 		--screen main= --screen 'detail=\r' --screen renewal=2 \
 		--screen 'live=jc' --screen create=n --screen cas=5 \
+		--screen export=5x --screen 'import=5Xread\r\r' \
 		--screen help=?
 
 ## readme: regenerate the generated README sections from tool.json.

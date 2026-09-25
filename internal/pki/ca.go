@@ -101,10 +101,14 @@ var AnchorDirs = map[string]string{
 // store and the CA's common name, so it is the narrowest of the three.
 var caNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
-// ownerRe accepts `user` or `user:group` the way useradd names them. A value
-// starting with a dash would be read by chown as an option.
-var ownerRe = regexp.MustCompile(
-	`^[a-z_][a-z0-9_-]{0,31}\$?(:[a-z_][a-z0-9_-]{0,31}\$?)?$`)
+// ownerPartRe accepts one half of an owner: a name the way useradd spells one,
+// or a numeric id. A value starting with a dash would be read by chown as an
+// option, and neither form can start with one.
+var ownerPartRe = regexp.MustCompile(`^([a-z_][a-z0-9_-]{0,31}\$?|0|[1-9][0-9]{0,9})$`)
+
+// maxOwnerID is the largest uid or gid chown takes: ids are 32 bits, and
+// 4294967295 is (uid_t)-1, which chown reads as "leave this one unchanged".
+const maxOwnerID = 4294967294
 
 // serialRe is the `-set_serial` value the builders accept.
 var serialRe = regexp.MustCompile(`^0x[0-9a-f]{2,40}$`)
@@ -118,15 +122,66 @@ func CheckCAName(name string) error {
 	return nil
 }
 
-// CheckOwner validates an owner. Empty is valid: the pair stays with root.
+// CheckOwner validates an owner: `user`, `user:group`, or the numeric
+// `uid:gid` a service in a container reads its files as. Empty is valid: the
+// pair stays with root.
 func CheckOwner(owner string) error {
 	if owner == "" {
 		return nil
 	}
-	if !ownerRe.MatchString(owner) {
-		return fmt.Errorf("%q is not an owner: `user` or `user:group`", owner)
+	refuse := fmt.Errorf("%q is not an owner: `user`, `user:group` or a "+
+		"numeric `uid:gid`", owner)
+	name, group, hasGroup := strings.Cut(owner, ":")
+	parts := []string{name}
+	if hasGroup {
+		parts = append(parts, group)
+	}
+	for _, part := range parts {
+		if !ownerPartRe.MatchString(part) {
+			return refuse
+		}
+		if isNumericID(part) {
+			if id, err := strconv.ParseUint(part, 10, 64); err != nil ||
+				id > maxOwnerID {
+				return fmt.Errorf("%s is not a uid or a gid: ids go up to %d",
+					part, maxOwnerID)
+			}
+		}
 	}
 	return nil
+}
+
+// isNumericID reports whether one half of an owner is a number rather than a
+// name. A name cannot start with a digit, so the first character decides.
+func isNumericID(part string) bool {
+	return part != "" && part[0] >= '0' && part[0] <= '9'
+}
+
+// NumericOwner reports whether an owner names an id rather than an account,
+// in either half. Such an owner is taken as it is: no account is looked up.
+func NumericOwner(owner string) bool {
+	name, group, _ := strings.Cut(owner, ":")
+	return isNumericID(name) || isNumericID(group)
+}
+
+// OwnerPhrase says who an owner is in a sentence, naming numeric ids as ids:
+// "uid 1000, gid 1000" rather than a "1000:1000" that reads like a time.
+func OwnerPhrase(owner string) string {
+	name, group, hasGroup := strings.Cut(owner, ":")
+	describe := func(part, kind string) string {
+		if isNumericID(part) {
+			return kind + " " + part
+		}
+		return part
+	}
+	if !NumericOwner(owner) {
+		return owner
+	}
+	phrase := describe(name, "uid")
+	if hasGroup {
+		phrase += ", " + describe(group, "gid")
+	}
+	return phrase
 }
 
 // NewSerial is a random 127-bit serial number in the form `-set_serial`
@@ -394,7 +449,7 @@ func BuildIssue(req certs.IssueRequest, in IssueInput) (certs.IssuePlan, error) 
 	if req.Owner != "" {
 		commands = append(commands, certs.Command{
 			Argv:        []string{"chown", req.Owner, keyPath, chainPath},
-			Description: "Hand the pair to " + req.Owner + ", the account that reads it",
+			Description: ownerDescription(req.Owner),
 			Destructive: true,
 		})
 	}
@@ -423,6 +478,15 @@ func BuildIssue(req certs.IssueRequest, in IssueInput) (certs.IssuePlan, error) 
 	}
 	plan.Warning = strings.Join(warnings, "\n\n")
 	return plan, nil
+}
+
+// ownerDescription is the chown command's line in the review.
+func ownerDescription(owner string) string {
+	if NumericOwner(owner) {
+		return "Hand the pair to " + OwnerPhrase(owner) + ", as numbers: the " +
+			"ids the service reads it as, looked up nowhere"
+	}
+	return "Hand the pair to " + owner + ", the account that reads it"
 }
 
 // shortFingerprint keeps the first bytes of a fingerprint, which is enough to
@@ -712,6 +776,8 @@ func LoadCAs(fsys FS, root string, trust TrustSet, store string,
 			}
 			parsed = chain[0]
 			ca.Cert = Describe(parsed, now)
+			ca.PEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE",
+				Bytes: parsed.Raw}))
 			ca.Trusted = trust.Holds(parsed, now)
 		}
 		if anchor := AnchorPath(store, entry.Name); anchor != "" {

@@ -533,6 +533,10 @@ type CA struct {
 	Cert Cert `json:"cert"`
 	// Unreadable explains a CA whose certificate could not be read.
 	Unreadable string `json:"unreadable,omitempty"`
+	// PEM is the certificate re-encoded as one PEM block, which is what the
+	// export screen prints for pasting on another host. It is public, and it
+	// is left out of the JSON report, which already carries the fingerprint.
+	PEM string `json:"-"`
 	// Key is the private key's mode, from a stat. Nothing reads the key: its
 	// mode is the only fact about it worth a finding.
 	Key KeyFile `json:"key"`
@@ -890,6 +894,42 @@ type IssuePlan struct {
 	Commands []Command
 }
 
+// ImportRequest is a CA certificate brought from another host: pasted as
+// PEM or read from a file, and the name it goes under here.
+type ImportRequest struct {
+	// Name is the directory under the CA root.
+	Name string
+	// PEM is what was pasted or read. It is parsed and re-encoded before
+	// anything is written, so the file is exactly the certificate the review
+	// showed the fingerprint of.
+	PEM []byte
+}
+
+// ImportPlan writes an imported CA certificate, without a key, where
+// tui-cert looks for local CAs, so `t` can trust it here.
+type ImportPlan struct {
+	Name     string
+	Dir      string
+	CertPath string
+	// Subject, Fingerprint and NotAfter describe the certificate being
+	// written, for the reader to compare with the other host.
+	Subject     string
+	Fingerprint string
+	NotAfter    time.Time
+	Warning     string
+	Commands    []Command
+}
+
+// ExportPlan copies a local CA's certificate to a path the reader chose, for
+// scp or a USB stick.
+type ExportPlan struct {
+	CA       string
+	Path     string
+	Existing bool
+	Warning  string
+	Commands []Command
+}
+
 // TrustPlan adds a local CA to the system trust store, or takes it out.
 type TrustPlan struct {
 	CA       string
@@ -954,4 +994,14 @@ type Backend interface {
 	// BuildTrust renders the commands that put a local CA into the system
 	// trust store (trust true) or take it out again.
 	BuildTrust(model Model, name string, trust bool) (TrustPlan, error)
+	// BuildExportCA renders the command that copies a local CA's certificate
+	// to a file the reader chose.
+	BuildExportCA(model Model, name, path string) (ExportPlan, error)
+	// ReadImport reads a file the reader picked as a CA certificate to
+	// import. It is a read, bounded in size, and never of a private key: the
+	// content is refused if it holds one.
+	ReadImport(path string) ([]byte, error)
+	// BuildImportCA renders the commands that install a CA certificate from
+	// another host, without its key, under the CA root.
+	BuildImportCA(model Model, req ImportRequest) (ImportPlan, error)
 }
