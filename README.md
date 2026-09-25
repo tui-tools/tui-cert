@@ -4,9 +4,11 @@
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14368/badge)](https://www.bestpractices.dev/projects/14368)
 
 <!-- stability:start -->
-> **Beta.** The family is days old and still changing. Package names, flags
-> and keys may move without notice until 1.0. Pin versions, and report what
-> breaks.
+> **Stable since v1.0.0.** Keys, flags and the `--check` JSON follow semver:
+> anything new arrives in a minor release, and a removal or a change of meaning
+> waits for the next major, announced one minor before. What stable means: [the
+> family's
+> bar](https://github.com/tui-tools/tui-kit/blob/main/docs/stability.md).
 <!-- stability:end -->
 
 A terminal UI for the TLS certificates on this machine. It finds them, puts them
@@ -133,7 +135,7 @@ Upgrades then arrive with the rest of your system updates.
 ### Any distribution, static binary
 
 ```sh
-curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v0.3.1/tui-cert_0.3.1_linux_amd64.tar.gz | tar -xz tui-cert
+curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v1.0.0/tui-cert_1.0.0_linux_amd64.tar.gz | tar -xz tui-cert
 sudo install -m0755 tui-cert /usr/local/bin/tui-cert
 ```
 
@@ -577,6 +579,44 @@ $ tui-cert --check | jq '.cas[0], (.certs[] | select(.localCA) | .path)'
 The only paths in the `cas` block are the CA's own. An issued pair is always
 `fullchain.pem` and `privkey.pem` in one directory.
 
+## Stability
+
+tui-cert is stable since 1.0.0 and follows [semver](https://semver.org). What
+is frozen is the contract a script or a habit can depend on:
+
+- **the keys**: every key the help screen (`?`) and [Keys](#keys) list, on the
+  five screens, the detail screen, the export page and the forms (`ctrl+u`
+  included);
+- **the flags**: `--check`, `--create-dir`, `--demo`, `--path`, `--report`,
+  `--sudo`, `--theme` and `--version`, and the `TUI_CERT_*` configuration keys
+  they mirror;
+- **the `--check` JSON**: every field name and what it means. At the top
+  level: `tool`, `version`, `backend`, `describe`, the counts (`certificates`,
+  `expired`, `expiring7`, `expiring30`, `mismatches`, `weakKeys`,
+  `exposedKeys`, `unreadable`, `findings`, `risks`, `localCAs`), `certs`,
+  `acme`, `cas`, `trustStore`, `tools`, `locations` and `compat`.
+  Each `certs` row: `path`, `source`, `subject`, `sans`, `issuer`,
+  `notAfter`, `daysLeft`, `keyType`, `keyBits`, `verdict`, `keyMatches`,
+  `usedBy`, `findings`, `unreadable`, `localCA`, `issuerUntrusted`. Each `cas`
+  row: `name`, `certPath`, `subject`, `fingerprint`, `notAfter`, `daysLeft`,
+  `keyType`, `canIssue`, `trusted`, `issued`, `verdict`, `findings`,
+  `unreadable`. Each `acme` row: `client`, `present`, `version`, `timer`,
+  `timerState`, `timerActive`, `certificates`, `unavailable`. A field marked
+  optional is left out when it is empty, and that is part of its meaning.
+
+Not part of the contract: the `model` field of `--check`. It is a diagnostic
+dump of the tool's internal state, there for bug reports, and it may change in
+any release, minor or patch. Do not script against it; everything a script
+needs is in the fields above.
+
+A minor release only adds: new keys, new flags, new `--check` fields. Removing
+or renaming one, or changing what it means, happens only in a major release,
+and the minor release before that major warns about it, on screen and in
+`--check`. The commands a key previews may gain a safer flag or a check in a
+minor release; what they change on the machine does not. The bar a tool in
+the family meets to be called stable is in [tui-kit's stability
+page](https://github.com/tui-tools/tui-kit/blob/main/docs/stability.md).
+
 ## Usage
 
 ```sh
@@ -601,7 +641,7 @@ no network connection, so it is safe to run anywhere.
 $ tui-cert --check | head -12
 {
   "tool": "tui-cert",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "backend": "pki",
   "describe": "read with crypto/x509; certbot, openssl for the actions",
   "certificates": 7,
@@ -638,7 +678,7 @@ thing worth reporting.
 
 ```console
 $ tui-cert --report
-tui-cert 0.1.2 (kit v0.2.9)
+tui-cert 1.0.0 (kit v0.4.3)
 backend: pki (version unknown: read with crypto/x509, so there is no program version to read)
 mode: live
 distro: fedora 42 (Fedora Linux 42 (Workstation Edition))
@@ -720,7 +760,7 @@ clears it; `ctrl+u` clears a field wherever the cursor is.
 
 ![Help](docs/screenshots/tui-cert-help.png)
 
-## What v0.1 can do
+## What it can do
 
 - Find the certificates on the machine: the Let's Encrypt tree, `/etc/ssl`,
   `/etc/pki`, the acme.sh and Caddy stores, the paths an nginx, Apache or Caddy
@@ -752,9 +792,11 @@ clears it; `ctrl+u` clears a field wherever the cursor is.
   DNS names and IP addresses owned by the account (or the container uid) that
   reads them, export it as PEM or to a file, import one from another host, and
   trust or untrust it on Debian, Fedora and Arch.
+- Report everything it read as JSON with `--check`, for scripts and tests, and
+  what a bug report needs with `--report`.
 - Follow the active Omarchy theme, and respect `NO_COLOR`.
 
-## What v0.1 cannot do
+## What it cannot do
 
 - **No certificate is ever deleted, moved or rewritten.** What is written is
   new: a pair, a CA, an imported CA certificate, or an exported copy at a path
