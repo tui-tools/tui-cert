@@ -318,5 +318,7 @@
     "ca",
     "pki",
     "trust-store"
-  ]
+  ],
+  "stability": "stable",
+  "stableSince": "1.0.0"
 }
