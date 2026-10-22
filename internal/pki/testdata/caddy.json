@@ -1,0 +1,13 @@
+{
+  "storage": {
+    "module": "file_system",
+    "root": "/var/lib/caddy-json"
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "srv0": {"listen": [":443"]}
+      }
+    }
+  }
+}

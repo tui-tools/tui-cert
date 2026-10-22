@@ -33,10 +33,25 @@ type (
 )
 
 // FS is the three reads the scanner makes.
+//
+// Plain is a fourth, optional one: a read that never escalates, for a file
+// that holds a private key. Read may fall back to `sudo cat` for a
+// certificate directory this user cannot open; a private key is never read
+// that way. An FS whose Read does not escalate leaves Plain nil, and Read is
+// used.
 type FS struct {
-	Read ReadFunc
-	List ListFunc
-	Stat StatFunc
+	Read  ReadFunc
+	List  ListFunc
+	Stat  StatFunc
+	Plain ReadFunc
+}
+
+// readPlain reads a file without escalating.
+func (f FS) readPlain(path string) ([]byte, error) {
+	if f.Plain != nil {
+		return f.Plain(path)
+	}
+	return f.Read(path)
 }
 
 // OSFS is the plain, unprivileged file system: what an ordinary process can
@@ -73,6 +88,12 @@ func OSFS() FS {
 }
 
 // Location is one place the scanner looks: where, why, and how deep.
+//
+// It is also the whole of what teaching tui-cert a new store takes. A server
+// or an ACME client that keeps its certificates somewhere this table does not
+// list is one more row — a path, a kind, a source and a depth, plus ManagedBy
+// when that program renews them itself — and no other code changes. See
+// "Adding a store" in CONTRIBUTING.md.
 type Location struct {
 	// Path is the directory.
 	Path string
@@ -87,6 +108,21 @@ type Location struct {
 	// Config marks a location whose files are server configuration to be read
 	// for references rather than certificates to be parsed.
 	Config string
+	// ManagedBy names the server that obtains and renews the certificates in
+	// this store on its own, such as ManagerCaddy. Everything found here is
+	// read-only: no action that writes a certificate is offered for it.
+	ManagedBy string
+	// Format is how the store keeps a certificate: FormatPEM (the zero value)
+	// for files named like certificates, or FormatFerronCache.
+	Format string
+}
+
+// isCert reports whether a file in this location is a certificate.
+func (l Location) isCert(name string) bool {
+	if l.Format == FormatFerronCache {
+		return isFerronCertFile(name)
+	}
+	return isCertFile(name)
 }
 
 // scanLocations are the places a certificate lives on a Linux machine.
@@ -97,7 +133,10 @@ type Location struct {
 // would bury the four that matter under the whole of Mozilla's root program.
 // The same goes for the bundles under /etc/pki/tls/certs, which are skipped by
 // name.
-func scanLocations(home string) []Location {
+//
+// The stores Caddy and Ferron manage themselves come from managedLocations,
+// and xdgData is $XDG_DATA_HOME, which moves both of them.
+func scanLocations(home, xdgData string) []Location {
 	locations := []Location{
 		{Path: "/etc/letsencrypt/live", Kind: "Let's Encrypt",
 			Source: certs.SourceLetsEncrypt, Depth: 2},
@@ -110,8 +149,6 @@ func scanLocations(home string) []Location {
 		{Path: IssuedRoot, Kind: "issued by a local CA",
 			Source: certs.SourceLocalCA, Depth: 2},
 		{Path: "/etc/acme.sh", Kind: "acme.sh", Source: certs.SourceAcmeSh, Depth: 2},
-		{Path: "/var/lib/caddy/.local/share/caddy/certificates", Kind: "Caddy",
-			Source: certs.SourceCaddy, Depth: 4},
 		{Path: "/etc/nginx", Kind: "nginx configuration", Depth: 3, Config: ServerNginx},
 		{Path: "/etc/apache2", Kind: "Apache configuration", Depth: 3, Config: ServerApache},
 		{Path: "/etc/httpd", Kind: "Apache configuration", Depth: 3, Config: ServerApache},
@@ -124,7 +161,32 @@ func scanLocations(home string) []Location {
 			Location{Path: path.Join(home, UserCreateSuffix),
 				Kind: "written by tui-cert", Source: certs.SourceSystem, Depth: 1})
 	}
-	return locations
+	return dedupeLocations(append(locations, managedLocations(home, xdgData)...))
+}
+
+// MachineLocations is every place a load looks: the fixed table, plus the
+// stores the Caddy and Ferron configuration on the machine move somewhere
+// else.
+func MachineLocations(fsys FS, home, xdgData string) []Location {
+	return dedupeLocations(append(scanLocations(home, xdgData),
+		configuredStores(fsys, storeConfigLocations())...))
+}
+
+// dedupeLocations drops a location whose path an earlier one already
+// covers: a home of /var/lib/caddy, or a configured store that is the
+// default one, must not list the same certificates twice.
+func dedupeLocations(locations []Location) []Location {
+	seen := map[string]bool{}
+	out := make([]Location, 0, len(locations))
+	for _, location := range locations {
+		key := path.Clean(location.Path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, location)
+	}
+	return out
 }
 
 // CaddyStorage is the directory Caddy keeps the certificates it manages
@@ -204,19 +266,20 @@ func Scan(fsys FS, locations []Location, extra []string) ([]Found,
 	map[string][]ConfigRef, []certs.Location) {
 	seen := map[string]bool{}
 	var order []Found
-	add := func(path, source string) {
-		if path == "" || seen[path] {
+	add := func(found Found) {
+		if found.Path == "" || seen[found.Path] {
 			return
 		}
-		seen[path] = true
-		order = append(order, Found{Path: path, Source: source})
+		seen[found.Path] = true
+		order = append(order, found)
 	}
 
 	references := map[string][]ConfigRef{}
 	reported := make([]certs.Location, 0, len(locations)+1)
 
 	for _, location := range locations {
-		entry := certs.Location{Path: location.Path, Kind: location.Kind}
+		entry := certs.Location{Path: location.Path, Kind: location.Kind,
+			ManagedBy: location.ManagedBy}
 		files, err := walk(fsys, location.Path, location.Depth)
 		if err != nil {
 			entry.Skipped = err.Error()
@@ -235,16 +298,17 @@ func Scan(fsys FS, locations []Location, extra []string) ([]Found,
 				for _, ref := range ParseServerConfig(location.Config, file,
 					string(raw)) {
 					entry.Found++
-					add(ref.CertPath, certs.SourceServer)
+					add(Found{Path: ref.CertPath, Source: certs.SourceServer})
 					references[ref.CertPath] = append(references[ref.CertPath], ref)
 				}
 				continue
 			}
-			if !isCertFile(path.Base(file)) {
+			if !location.isCert(path.Base(file)) {
 				continue
 			}
 			entry.Found++
-			add(file, location.Source)
+			add(Found{Path: file, Source: location.Source,
+				ManagedBy: location.ManagedBy, Format: location.Format})
 		}
 		reported = append(reported, entry)
 	}
@@ -261,7 +325,7 @@ func Scan(fsys FS, locations []Location, extra []string) ([]Found,
 					continue
 				}
 				entry.Found++
-				add(candidate, certs.SourceConfigured)
+				add(Found{Path: candidate, Source: certs.SourceConfigured})
 				continue
 			}
 			for _, file := range files {
@@ -269,7 +333,7 @@ func Scan(fsys FS, locations []Location, extra []string) ([]Found,
 					continue
 				}
 				entry.Found++
-				add(file, certs.SourceConfigured)
+				add(Found{Path: file, Source: certs.SourceConfigured})
 			}
 		}
 		reported = append(reported, entry)
@@ -282,6 +346,9 @@ func Scan(fsys FS, locations []Location, extra []string) ([]Found,
 type Found struct {
 	Path   string
 	Source string
+	// ManagedBy and Format are the location's, carried to BuildEntry.
+	ManagedBy string
+	Format    string
 }
 
 // walk lists the files under a directory, up to a depth. It returns an error
@@ -395,7 +462,7 @@ func InspectKey(fsys FS, certPath string, keyPath string,
 			GroupReadable: mode.Perm()&0o040 != 0,
 			WorldReadable: mode.Perm()&0o004 != 0,
 		}
-		raw, readErr := fsys.Read(candidate)
+		raw, readErr := fsys.readPlain(candidate)
 		switch {
 		case readErr != nil:
 			key.Note = "not readable by this user, so the match is unknown"

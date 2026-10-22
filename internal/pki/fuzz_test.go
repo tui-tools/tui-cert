@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -396,4 +397,62 @@ func FuzzParseCAPEM(f *testing.F) {
 			t.Fatalf("the re-encoding is not one clean block: %q", clean)
 		}
 	})
+}
+
+func FuzzParseFerronEntry(f *testing.F) {
+	seed(f, "ferron-cache-entry.json")
+	f.Add(`{"certificate_chain_pem":""}`)
+	f.Add(`{"certificate_chain_pem":1}`)
+	f.Fuzz(func(t *testing.T, raw string) {
+		chain, key, err := ParseFerronEntry([]byte(raw))
+		if err != nil {
+			if chain != nil || key != nil {
+				t.Fatal("returned material with an error")
+			}
+			return
+		}
+		// A file is only ever taken for a cache entry when it carries a chain:
+		// an account or a lock file must not turn into an empty row.
+		if strings.TrimSpace(string(chain)) == "" {
+			t.Fatal("accepted an entry with no chain")
+		}
+	})
+}
+
+func FuzzParseCaddyStorage(f *testing.F) {
+	seed(f, "Caddyfile-storage", "Caddyfile-storage-block", "caddy.json", "Caddyfile")
+	f.Add("storage file_system {\n")
+	f.Add(`{"storage":{"module":"file_system","root":"relative"}}`)
+	f.Fuzz(func(t *testing.T, text string) {
+		for _, root := range ParseCaddyStorage(text) {
+			storeDirOK(t, root)
+		}
+	})
+}
+
+func FuzzParseFerronCache(f *testing.F) {
+	seed(f, "ferron.kdl", "ferron.conf")
+	f.Add("cache \"/a b\"\n")
+	f.Add("auto_tls_cache /x // comment\n")
+	f.Fuzz(func(t *testing.T, text string) {
+		for _, dir := range ParseFerronCache(text) {
+			storeDirOK(t, dir)
+		}
+	})
+}
+
+// storeDirOK asserts what every store a configuration names must be before the
+// scanner lists it: an absolute, clean path with nothing left to expand.
+func storeDirOK(t *testing.T, dir string) {
+	t.Helper()
+	if !strings.HasPrefix(dir, "/") {
+		t.Fatalf("store is not absolute: %q", dir)
+	}
+	if strings.ContainsAny(dir, "{}$*?\"") {
+		t.Fatalf("store carries a placeholder: %q", dir)
+	}
+	if path.Clean(dir) != dir {
+		t.Fatalf("store is not clean: %q", dir)
+	}
+	noControl(t, "store", dir)
 }

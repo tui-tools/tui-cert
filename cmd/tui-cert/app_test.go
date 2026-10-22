@@ -82,8 +82,8 @@ func selectEntry(t *testing.T, a *app, subject string) certs.Entry {
 
 func TestLoadsTheSampleMachine(t *testing.T) {
 	a, _ := newTestApp(t)
-	if len(a.entries) != 9 {
-		t.Fatalf("loaded %d certificates, want the sample machine's 9", len(a.entries))
+	if len(a.entries) != 11 {
+		t.Fatalf("loaded %d certificates, want the sample machine's 11", len(a.entries))
 	}
 	counts := a.model.Count()
 	if counts.Expired != 1 || counts.Expiring7 != 1 || counts.Mismatches != 1 {
@@ -851,5 +851,57 @@ func TestHelpListsTheNewKeys(t *testing.T) {
 		if !strings.Contains(listed, key+" ") {
 			t.Errorf("the help screen does not list %q", key)
 		}
+	}
+}
+
+// TestManagedCertificatesAreReadOnly covers issue #17: a certificate Caddy or
+// Ferron obtained and renews itself is listed like any other, says who manages
+// it, and is offered nothing that would write it or copy it somewhere.
+func TestManagedCertificatesAreReadOnly(t *testing.T) {
+	for _, tc := range []struct{ subject, manager string }{
+		{"blog.example.com", "Caddy"},
+		{"docs.example.com", "Ferron"},
+	} {
+		t.Run(tc.manager, func(t *testing.T) {
+			a, backend := newTestApp(t)
+			entry := selectEntry(t, a, tc.subject)
+			if entry.ManagedBy != tc.manager {
+				t.Fatalf("%s is managed by %q, want %q", tc.subject,
+					entry.ManagedBy, tc.manager)
+			}
+			leaf, ok := entry.Leaf()
+			if !ok || len(leaf.SANs) == 0 || leaf.DaysLeft <= 0 {
+				t.Fatalf("%s lost its expiry or names: %+v", tc.subject, leaf)
+			}
+			if !entry.Key.MatchChecked || !entry.Key.Matches {
+				t.Errorf("%s key = %+v, want a checked match", tc.subject, entry.Key)
+			}
+
+			// The marker is in the inventory and on the detail screen.
+			if cell := usedByCell(entry); !strings.Contains(cell, tc.manager) {
+				t.Errorf("USED BY = %q, want it to name %s", cell, tc.manager)
+			}
+			detail := strings.Join(a.certDetail(), "\n")
+			if !strings.Contains(detail, "managed by "+tc.manager+", renews on its own") {
+				t.Errorf("the detail screen does not say who manages it:\n%s", detail)
+			}
+
+			// No install hint while it is selected, and the key refuses.
+			for _, hint := range a.shortHelpKeys() {
+				if hint.Key == "i" {
+					t.Errorf("the install hint is shown for a managed certificate")
+				}
+			}
+			drain(t, a, press(a, "i"))
+			if a.mode == modePicker {
+				t.Fatal("a managed certificate opened the destination picker")
+			}
+			if !strings.Contains(a.status, "renews on its own") {
+				t.Errorf("status = %q, want the reason", a.status)
+			}
+			if ran := backend.Ran(); len(ran) != 0 {
+				t.Errorf("something ran for a managed certificate: %+v", ran)
+			}
+		})
 	}
 }

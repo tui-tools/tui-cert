@@ -135,7 +135,7 @@ Upgrades then arrive with the rest of your system updates.
 ### Any distribution, static binary
 
 ```sh
-curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v1.0.3/tui-cert_1.0.3_linux_amd64.tar.gz | tar -xz tui-cert
+curl -fsSL https://github.com/tui-tools/tui-cert/releases/download/v1.1.0/tui-cert_1.1.0_linux_amd64.tar.gz | tar -xz tui-cert
 sudo install -m0755 tui-cert /usr/local/bin/tui-cert
 ```
 
@@ -200,7 +200,8 @@ with its key world-readable, one from a private authority whose key is **not**
 its key, a wildcard, one an nginx configuration serves, and one nothing on the
 machine refers to any more. Beside them is a local CA the machine has not
 trusted yet, with the two server certificates it signed, one of them for an IP
-address. Every key works, every command is built and previewed for real, and
+address, and two certificates a web server renews on its own: one in Caddy's
+store and one in Ferron's ACME cache. Every key works, every command is built and previewed for real, and
 nothing touches your system.
 
 The demo's certificates are generated with `crypto/x509` when it starts and
@@ -228,8 +229,15 @@ says exactly what each missing one costs.
 - `/etc/tui-cert/issued/*` — what a local CA issued, and `/etc/tui-cert/ca/*`,
   the local CAs themselves, which have [a screen of their own](#a-local-ca)
 - `/etc/acme.sh` and `~/.acme.sh`
-- `/var/lib/caddy/.local/share/caddy/certificates` — read-only; Caddy renews
-  these itself and a second tool writing there is how a working setup breaks
+- Caddy's store, `caddy/certificates` under `/var/lib/caddy/.local/share`,
+  `/data` (the container image), `$XDG_DATA_HOME` and `~/.local/share`, and
+  wherever a `storage file_system` in `/etc/caddy` moves it — read-only, see
+  [below](#certificates-a-server-manages-itself)
+- Ferron's ACME cache, `/var/cache/ferron-acme`,
+  `/var/lib/ferron/.local/share/ferron-acme`, `/var/lib/ferron-acme`,
+  `$XDG_DATA_HOME/ferron-acme` and `~/.local/share/ferron-acme`, and wherever
+  `auto_tls_cache` (Ferron 2, `/etc/ferron.kdl`) or a `tls` block's `cache`
+  (Ferron 3, `/etc/ferron`) moves it — read-only too
 - every path an `nginx`, Apache or Caddy configuration names —
   `ssl_certificate`, `SSLCertificateFile`, `tls` — parsed out of the text,
   read-only
@@ -245,6 +253,31 @@ Two of those directories are mode 0700 on every distribution, so reading them
 escalates through `sudo -n`, which never prompts. A machine where it would
 prompt loses those certificates and keeps the rest, and the sources screen says
 which.
+
+## Certificates a server manages itself
+
+Caddy and Ferron do automatic HTTPS: they obtain a certificate, keep it in their
+own store and renew it, with no certbot step anywhere. `tui-cert` lists those
+certificates like every other one, with their names, issuer and days left, and
+marks each **managed by Caddy (or Ferron), renews on its own**: `Caddy (auto)`
+in the inventory's USED BY column, a `managed` line on the detail screen, and
+`"managedBy"` in `--check`.
+
+Nothing is offered for them. A second tool writing into a server's store is how
+a working setup breaks, so there is no renewal, no install and no replacement:
+`i` on one says why and does nothing, and its hint is not shown while one is
+selected. What is left is what a person needs to know, which is whether it is
+still being renewed. A managed certificate inside the expiry window says that
+the server renews it itself and that its log is where to look.
+
+Ferron keeps the certificate and its private key in one JSON file at mode 0600,
+so that file is read the way a key is: [never through `sudo`](#private-keys).
+Run as another user, the row is there and says why it could not be opened; run
+as root, or as the user Ferron runs as, it shows in full.
+
+A server or an ACME client that keeps its certificates somewhere else is one row
+in the `Location` table, not a change across the tool. [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-store)
+says what the row takes.
 
 ## Findings first
 
@@ -597,7 +630,8 @@ is frozen is the contract a script or a habit can depend on:
   `acme`, `cas`, `trustStore`, `tools`, `locations` and `compat`.
   Each `certs` row: `path`, `source`, `subject`, `sans`, `issuer`,
   `notAfter`, `daysLeft`, `keyType`, `keyBits`, `verdict`, `keyMatches`,
-  `usedBy`, `findings`, `unreadable`, `localCA`, `issuerUntrusted`. Each `cas`
+  `usedBy`, `findings`, `unreadable`, `localCA`, `issuerUntrusted`, and, since
+  1.1.0, `managedBy` (optional), which a `locations` row carries too. Each `cas`
   row: `name`, `certPath`, `subject`, `fingerprint`, `notAfter`, `daysLeft`,
   `keyType`, `canIssue`, `trusted`, `issued`, `verdict`, `findings`,
   `unreadable`. Each `acme` row: `client`, `present`, `version`, `timer`,
@@ -763,8 +797,11 @@ clears it; `ctrl+u` clears a field wherever the cursor is.
 ## What it can do
 
 - Find the certificates on the machine: the Let's Encrypt tree, `/etc/ssl`,
-  `/etc/pki`, the acme.sh and Caddy stores, the paths an nginx, Apache or Caddy
+  `/etc/pki`, the acme.sh store, the paths an nginx, Apache or Caddy
   configuration names, and anything you add through `paths`.
+- List the certificates Caddy and Ferron obtain and renew on their own, from
+  their default stores or the one their configuration names, marked as managed
+  and never acted on.
 - Parse PEM and DER, single certificates and full chains, entirely in Go.
 - Report subject, SANs, issuer and issuer family, validity with days left, key
   type and size, serial, SHA-256 fingerprint, key usage, extended key usage and
@@ -812,7 +849,9 @@ clears it; `ctrl+u` clears a field wherever the cursor is.
   no key rollover, no deactivation, no changing the contact afterwards.
 - **No destination you type.** `i` installs only to a pair of paths the scanner
   read out of a server configuration, and never over the file it is copying.
-- **No Caddy management.** Its storage is reported, read-only.
+- **No Caddy or Ferron management.** Their stores are reported, read-only:
+  nothing renews, installs, replaces or deletes a certificate a server
+  manages itself.
 - **No Java keystores, no PKCS#12, no NSS databases.** PEM and DER only.
 - **No `Include` following in server configurations.** The directives are read
   out of the files under `/etc/nginx`, `/etc/apache2`, `/etc/httpd` and

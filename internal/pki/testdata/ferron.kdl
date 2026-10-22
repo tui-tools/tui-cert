@@ -1,0 +1,7 @@
+// Ferron 2: one host with automatic TLS and a cache on its own path.
+example.com {
+    auto_tls
+    auto_tls_contact "admin@example.com"
+    auto_tls_cache "/var/cache/ferron-acme-custom"
+    root "/var/www/ferron"
+}

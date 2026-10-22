@@ -268,6 +268,7 @@ const (
 	SourceLetsEncrypt = "letsencrypt"
 	SourceAcmeSh      = "acme.sh"
 	SourceCaddy       = "caddy"
+	SourceFerron      = "ferron"
 	SourceSystem      = "system"
 	SourceServer      = "server config"
 	SourceConfigured  = "configured"
@@ -282,6 +283,11 @@ type Entry struct {
 	// Source names how the file was found, so a reader can tell a certificate
 	// certbot manages from one somebody dropped in /etc/ssl.
 	Source string `json:"source"`
+	// ManagedBy names the server that obtains and renews this certificate on
+	// its own — "Caddy", "Ferron" — when it was found in that server's store.
+	// Such a certificate is reported and never acted on: no renewal, no
+	// install, nothing written into the store. Empty for every other one.
+	ManagedBy string `json:"managedBy,omitempty"`
 	// Unreadable explains why Chain is empty, when it is.
 	Unreadable string `json:"unreadable,omitempty"`
 	// Chain is the certificates in the file, leaf first.
@@ -338,6 +344,10 @@ func (e Entry) Leaf() (Cert, bool) {
 	}
 	return e.Chain[0], true
 }
+
+// Managed reports whether a server renews this certificate on its own, which
+// is what keeps every action that would write it off the table.
+func (e Entry) Managed() bool { return e.ManagedBy != "" }
 
 // Label names the entry for a one-line summary.
 func (e Entry) Label() string {
@@ -440,6 +450,9 @@ type Location struct {
 	// Skipped explains an unsearched location: it does not exist, or it could
 	// not be listed by this user.
 	Skipped string `json:"skipped,omitempty"`
+	// ManagedBy names the server that keeps this store and renews what is in
+	// it, empty for a location no server manages.
+	ManagedBy string `json:"managedBy,omitempty"`
 }
 
 // Live is the result of one TLS handshake against a running server. It is the

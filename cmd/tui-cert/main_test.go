@@ -114,7 +114,10 @@ func TestCheckReportsTheState(t *testing.T) {
 		`"tool": "tui-cert"`,
 		`"backend": "pki"`,
 		// The sample machine is the one the README describes.
-		`"certificates": 9`,
+		`"certificates": 11`,
+		// The two a web server manages itself say which one.
+		`"managedBy": "Caddy"`,
+		`"managedBy": "Ferron"`,
 		`"localCAs": 1`,
 		`"name": "homelab-ca"`,
 		`"localCA": "homelab-ca"`,

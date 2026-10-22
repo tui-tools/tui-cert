@@ -29,6 +29,42 @@ These are not style preferences, they are what makes the family coherent.
 - Commit messages say *why*, in the imperative: `Parse ufw route rules`, not
   `fixed stuff`.
 
+## Adding a store
+
+If your web server or ACME client keeps its certificates somewhere `tui-cert`
+does not look, teaching it is one row in a table, not a change across the tool.
+The table is `scanLocations` in
+[`internal/pki/scan.go`](internal/pki/scan.go) (and `managedLocations` in
+[`internal/pki/managed.go`](internal/pki/managed.go) for a server that renews
+its own certificates). Each row is a `Location`:
+
+```go
+{Path: "/var/lib/myserver/certs", Kind: "MyServer", Source: "myserver",
+	Depth: 3, ManagedBy: "MyServer"},
+```
+
+- `Path` is the directory, absolute.
+- `Kind` is the name the sources screen shows for it.
+- `Source` is what each certificate found there reports as its `source`.
+- `Depth` is how many directory levels below `Path` are walked: 1 for a flat
+  directory of PEM files, 2 for one directory per name, 3 for Caddy's
+  `<issuer>/<name>/<name>.crt`.
+- `ManagedBy` is the server's name when it obtains and renews these itself.
+  Set it and every certificate found there is marked managed and offered no
+  action that would write it. Leave it empty for a directory people manage by
+  hand or with certbot.
+- `Format` is how a certificate is stored. Empty means PEM or DER files named
+  `.pem`, `.crt`, `.cer` or `.cert`, which covers almost everything; a store
+  with its own file layout, like Ferron's JSON cache, needs a format and a
+  reader next to `FormatFerronCache`.
+
+Cite where the path comes from in a comment above the row (the server's
+documentation or its source), and add a case to the tests in
+`internal/pki/managed_test.go` or `scan_test.go` built on a temporary
+directory shaped like the real store. A private key is never read through
+`sudo`; a store that keeps the key and the certificate in one file is read with
+the plain read only, the way `buildFerronEntry` does.
+
 ## Layout
 
 Shared code — palette, widgets, config, the command runner — lives in

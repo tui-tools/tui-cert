@@ -1,0 +1,10 @@
+{
+	storage file_system {
+		root "/mnt/shared/caddy"
+	}
+	# storage file_system /commented/out
+}
+
+example.com {
+	respond "ok"
+}
