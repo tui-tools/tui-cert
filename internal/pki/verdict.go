@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"time"
 
@@ -24,9 +25,13 @@ const MinECBits = 256
 // trusts, and what all of that adds up to.
 func BuildEntry(fsys FS, found Found, refs []ConfigRef, roots *x509.CertPool,
 	now time.Time, hostname string) certs.Entry {
-	entry := certs.Entry{Path: found.Path, Source: found.Source}
+	entry := certs.Entry{Path: found.Path, Source: found.Source,
+		ManagedBy: found.ManagedBy}
 	for _, ref := range refs {
 		entry.References = append(entry.References, ref.Reference)
+	}
+	if found.Format == FormatFerronCache {
+		return buildFerronEntry(fsys, entry, roots, now, hostname)
 	}
 
 	raw, err := fsys.Read(found.Path)
@@ -151,6 +156,13 @@ func Judge(entry certs.Entry, now time.Time, hostname string) certs.Entry {
 				leaf.NotAfter.Format("2006-01-02") + ". An ACME client renews " +
 				"at 30 days, so this is the window where it should be happening.",
 		})
+	}
+	if entry.Managed() && len(entry.Findings) > 0 {
+		// The only finding so far is the expiry. The server renews this one
+		// itself, so what is left to do is find out why it has not: there is
+		// no key on any screen here for it.
+		entry.Findings[0].Message += " " + entry.ManagedBy + " renews this " +
+			"one itself; its own log says why it has not."
 	}
 
 	if entry.Key.Present && entry.Key.MatchChecked && !entry.Key.Matches {
@@ -393,4 +405,64 @@ func DescribeProtocol(version uint16) string {
 	default:
 		return fmt.Sprintf("0x%04x", version)
 	}
+}
+
+// ferronUnreadable is why a Ferron cache entry this user cannot open is not
+// shown.
+const ferronUnreadable = "Ferron keeps the private key in this same file, and " +
+	"tui-cert does not read a private key through sudo: run it as root or as " +
+	"the user Ferron runs as to see this certificate"
+
+// buildFerronEntry reads one entry of Ferron's ACME cache, where the chain and
+// the private key are two fields of the same JSON file.
+//
+// That file is a private key as much as it is a certificate, so it is read the
+// way a key is: by the plain read alone, never through sudo. Ferron writes it
+// at 0600 for the user it runs as, so a tui-cert run by anyone else lists the
+// file and says why it could not show it, rather than escalating to read a
+// key. The key that comes out is used for one comparison and dropped.
+func buildFerronEntry(fsys FS, entry certs.Entry, roots *x509.CertPool,
+	now time.Time, hostname string) certs.Entry {
+	raw, err := fsys.readPlain(entry.Path)
+	if err != nil {
+		entry.Unreadable = firstLine(err.Error())
+		if errors.Is(err, fs.ErrPermission) {
+			entry.Unreadable = ferronUnreadable
+		}
+		return Judge(entry, now, hostname)
+	}
+	chainPEM, keyPEM, err := ParseFerronEntry(raw)
+	clear(raw)
+	defer clear(keyPEM)
+	if err != nil {
+		entry.Unreadable = err.Error()
+		return Judge(entry, now, hostname)
+	}
+	parsed, err := parseCertificates(chainPEM)
+	if err != nil {
+		entry.Unreadable = err.Error()
+		return Judge(entry, now, hostname)
+	}
+	for _, cert := range parsed {
+		entry.Chain = append(entry.Chain, Describe(cert, now))
+	}
+
+	key := certs.KeyFile{Path: entry.Path, Present: len(keyPEM) > 0,
+		Note: "Ferron keeps the key in the same file as the certificate"}
+	if mode, statErr := fsys.Stat(entry.Path); statErr == nil {
+		key.Mode = fmt.Sprintf("%04o", mode.Perm())
+		key.GroupReadable = mode.Perm()&0o040 != 0
+		key.WorldReadable = mode.Perm()&0o004 != 0
+	}
+	if key.Present {
+		if public, keyErr := PublicKeyOf(keyPEM); keyErr == nil {
+			key.MatchChecked = true
+			key.Matches = SameKey(parsed[0].PublicKey, public)
+		} else {
+			key.Note = keyErr.Error()
+		}
+	}
+	entry.Key = key
+	verifyChain(&entry, parsed, roots, now)
+	return Judge(entry, now, hostname)
 }

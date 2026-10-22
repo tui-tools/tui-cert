@@ -45,6 +45,9 @@ type certReport struct {
 	// IssuerUntrusted flags an issuer this machine's trust store lacks.
 	LocalCA         string `json:"localCA,omitempty"`
 	IssuerUntrusted bool   `json:"issuerUntrusted,omitempty"`
+	// ManagedBy names the server that obtains and renews this certificate
+	// itself ("Caddy", "Ferron"), absent for every other one. Added in 1.1.0.
+	ManagedBy string `json:"managedBy,omitempty"`
 }
 
 // caReport is one local certificate authority, flattened for a script — and
@@ -183,6 +186,7 @@ func runCheck(backend certs.Backend, backendCompat compat.Result,
 			UsedBy:     entry.UsedBy(),
 			Unreadable: entry.Unreadable,
 			LocalCA:    entry.LocalCA,
+			ManagedBy:  entry.ManagedBy,
 
 			IssuerUntrusted: entry.IssuerUntrusted,
 		}

@@ -99,6 +99,10 @@ type Options struct {
 	// CARoot overrides where local CAs live. It is not a configuration key:
 	// it exists so a test can keep its CAs in a temporary directory.
 	CARoot string
+	// XDGDataHome is $XDG_DATA_HOME, which moves Caddy's and Ferron's stores
+	// for a server run as this user. Empty reads the environment, unless Home
+	// is set: a test that fixes one fixes both.
+	XDGDataHome string
 }
 
 // Real reads the certificates on this host. It satisfies certs.Backend.
@@ -328,6 +332,14 @@ func (r *Real) home() string {
 	return home
 }
 
+// xdgDataHome is where $XDG_DATA_HOME points, empty when it is unset.
+func (r *Real) xdgDataHome() string {
+	if r.opts.XDGDataHome != "" || r.opts.Home != "" {
+		return r.opts.XDGDataHome
+	}
+	return os.Getenv("XDG_DATA_HOME")
+}
+
 // Preview renders the exact command line Run will execute. Every command goes
 // through the runner of its own binary, so the preview carries the privilege
 // prefix that binary will really be called with.
@@ -405,6 +417,9 @@ func (r *Real) Run(ctx context.Context, cmd certs.Command) (string, error) {
 func (r *Real) fsFor(ctx context.Context) FS {
 	plain := OSFS()
 	return FS{
+		// A private key is read by the plain read alone, whatever Read
+		// would fall back to.
+		Plain: plain.Read,
 		Read: func(path string) ([]byte, error) {
 			raw, err := plain.Read(path)
 			if err == nil {
@@ -525,8 +540,8 @@ func (r *Real) Load(ctx context.Context) (certs.Model, error) {
 	}
 	roots := trust.Pool
 
-	found, references, locations := Scan(fsys, scanLocations(r.home()),
-		r.opts.ExtraPaths)
+	found, references, locations := Scan(fsys,
+		MachineLocations(fsys, r.home(), r.xdgDataHome()), r.opts.ExtraPaths)
 	model.Locations = locations
 	for _, file := range found {
 		model.Entries = append(model.Entries,

@@ -1,0 +1,9 @@
+# Global options: Caddy keeps its data on a separate disk.
+{
+	email ops@example.com
+	storage file_system /srv/caddy-data
+}
+
+shop.example.com {
+	reverse_proxy 127.0.0.1:8080
+}

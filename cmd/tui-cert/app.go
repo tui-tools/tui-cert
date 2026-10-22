@@ -930,6 +930,13 @@ func (a *app) openInstallPicker() tea.Cmd {
 			"select a certificate on screen 1 to install it somewhere")
 		return nil
 	}
+	if entry.Managed() {
+		a.setStatusf(ui.StatusWarn,
+			"%s is %s: a copy elsewhere would stop matching at its next "+
+				"renewal, so it is not installed anywhere", entry.Label(),
+			pki.ManagedNote(entry.ManagedBy))
+		return nil
+	}
 	if !a.caps.SupportsInstall {
 		reason := a.caps.InstallReason
 		if reason == "" {
@@ -1205,7 +1212,7 @@ func (a *app) applyFilter() {
 
 // entryHaystack is the text the filter matches a certificate against.
 func entryHaystack(entry certs.Entry) string {
-	parts := []string{entry.Path, entry.Source, entry.Unreadable,
+	parts := []string{entry.Path, entry.Source, entry.ManagedBy, entry.Unreadable,
 		string(entry.Verdict), entry.UsedBy(), entry.IssuerLabel()}
 	for _, cert := range entry.Chain {
 		parts = append(parts, cert.Subject, cert.Issuer, cert.IssuerKind,
@@ -1214,6 +1221,9 @@ func entryHaystack(entry certs.Entry) string {
 	}
 	for _, finding := range entry.Findings {
 		parts = append(parts, finding.Kind, finding.Message)
+	}
+	if entry.Managed() {
+		parts = append(parts, "managed")
 	}
 	return strings.Join(parts, " ")
 }
@@ -1268,11 +1278,14 @@ func (a *app) allSourceRows() []sourceRow {
 		if location.Skipped != "" {
 			value = location.Skipped
 		}
+		if location.ManagedBy != "" && location.Skipped == "" {
+			value += ", " + pki.ManagedNote(location.ManagedBy)
+		}
 		rows = append(rows, sourceRow{
 			label: location.Kind,
 			value: location.Path + "  —  " + value,
 			note:  location.Skipped,
-			warn:  location.Skipped != "" && location.Found == 0,
+			warn:  location.Skipped != "" && location.Found == 0 && !absentStore(location),
 		})
 	}
 	for _, tool := range a.model.Tools {
@@ -1295,6 +1308,15 @@ func (a *app) allSourceRows() []sourceRow {
 		rows = append(rows, sourceRow{label: "hostname", value: a.model.Hostname})
 	}
 	return rows
+}
+
+// absentStore reports a managed store that is simply not on this machine.
+// Caddy and Ferron each have several places they may keep their store, and
+// a machine runs at most one of each, so the ones that are not there are a
+// fact rather than a warning.
+func absentStore(location certs.Location) bool {
+	return location.ManagedBy != "" &&
+		strings.Contains(location.Skipped, "no such file or directory")
 }
 
 // firstNonEmpty returns the first value that has something in it.

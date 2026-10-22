@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/tui-tools/tui-cert/internal/certs"
+	"github.com/tui-tools/tui-cert/internal/pki"
 	"github.com/tui-tools/tui-kit/ui"
 )
 
@@ -271,7 +272,7 @@ func (a *app) certsTable() ([]ui.Column, [][]string, []*lipgloss.Style) {
 		columns = append(columns, ui.Column{Title: "FILE", Width: 28, Flex: true})
 	}
 	if showUsedBy {
-		columns = append(columns, ui.Column{Title: "USED BY", Width: 10})
+		columns = append(columns, ui.Column{Title: "USED BY", Width: 14})
 	}
 
 	rows := make([][]string, 0, len(a.entries))
@@ -295,7 +296,7 @@ func (a *app) certsTable() ([]ui.Column, [][]string, []*lipgloss.Style) {
 			row = append(row, entry.Path)
 		}
 		if showUsedBy {
-			row = append(row, orNone(entry.UsedBy()))
+			row = append(row, usedByCell(entry))
 		}
 		rows = append(rows, row)
 		styles = append(styles, a.verdictStyle(entry.Verdict))
@@ -550,6 +551,9 @@ func (a *app) certDetail() []string {
 		return []string{"(nothing selected)"}
 	}
 	lines := []string{entry.Path, "", "  found via     " + entry.Source}
+	if entry.Managed() {
+		lines = append(lines, "  managed       "+pki.ManagedNote(entry.ManagedBy))
+	}
 	if entry.Unreadable != "" {
 		return append(lines, "", "This file could not be read:", "  "+entry.Unreadable)
 	}
@@ -843,6 +847,16 @@ func yesNo(value bool) string {
 	return "no"
 }
 
+// usedByCell is the inventory's USED BY column: the servers whose
+// configuration names the file, or, for a certificate a server keeps in its
+// own store, that server with "(auto)" — it renews that one itself.
+func usedByCell(entry certs.Entry) string {
+	if entry.Managed() && entry.UsedBy() == "" {
+		return entry.ManagedBy + " (auto)"
+	}
+	return orNone(entry.UsedBy())
+}
+
 // orNone renders an empty value as a visible placeholder, so a blank line is
 // never mistaken for a missing read.
 func orNone(value string) string {
@@ -878,8 +892,13 @@ func (a *app) shortHelpKeys() []ui.KeyHint {
 		hints = append(hints,
 			ui.KeyHint{Key: "c", Desc: "live check"},
 			ui.KeyHint{Key: "C", Desc: "another host"},
-			ui.KeyHint{Key: "n", Desc: "generate"},
-			ui.KeyHint{Key: "i", Desc: "install"})
+			ui.KeyHint{Key: "n", Desc: "generate"})
+		// A certificate a server manages itself is read-only here, so the
+		// hint for the one key that would copy it is left off while it is
+		// selected.
+		if entry, ok := a.selectedEntry(); !ok || !entry.Managed() {
+			hints = append(hints, ui.KeyHint{Key: "i", Desc: "install"})
+		}
 	}
 	return append(hints,
 		ui.KeyHint{Key: "/", Desc: "filter"},
@@ -918,5 +937,6 @@ func helpKeys() []ui.KeyHint {
 		{Key: "note", Desc: "every change is previewed and confirmed first"},
 		{Key: "note", Desc: "reading is done in Go; nothing is shelled out to"},
 		{Key: "note", Desc: "a private key is never read through sudo"},
+		{Key: "note", Desc: "a certificate Caddy or Ferron manages is read-only: it renews on its own"},
 	}
 }

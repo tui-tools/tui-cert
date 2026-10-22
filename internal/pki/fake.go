@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io/fs"
@@ -209,8 +210,45 @@ func (f *Fake) reset() {
 	f.write(demoFile{path: path.Join(DemoHome, demoPartnerCA+".crt"), mode: 0o644,
 		body: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: partner.Raw})})
 
+	// 11 and 12. Two certificates a web server obtained and renews on its
+	//     own: Caddy's, in its data directory, and Ferron's, in its ACME
+	//     cache, where the chain and the key are one JSON file. Both are
+	//     listed and neither is ever acted on.
+	f.issueTo(path.Join(demoCaddyStore, "blog.example.com", "blog.example.com.crt"),
+		path.Join(demoCaddyStore, "blog.example.com", "blog.example.com.key"), 0o600,
+		[]string{"blog.example.com"}, in(74), publicCA, publicCAKey, true, true)
+	f.ferronEntry(demoFerronEntry, []string{"docs.example.com"}, in(52),
+		publicCA, publicCAKey)
+
 	f.anchors = f.anchorCount()
 	f.rebuild()
+}
+
+// The sample machine's managed stores.
+const (
+	demoCaddyStore = "/var/lib/caddy/.local/share/caddy/certificates/" +
+		"acme-v02.api.letsencrypt.org-directory"
+	demoFerronEntry = "/var/lib/ferron/.local/share/ferron-acme/" +
+		"q2Xf0uVjK7cR1aZb9mWnLg/certificate_7bHkP3sTzQe0yNcA4vRw1g"
+)
+
+// ferronEntry writes one certificate the way Ferron caches it: a JSON file at
+// 0600 holding the chain and the key.
+func (f *Fake) ferronEntry(file string, names []string, notAfter time.Time,
+	issuer *x509.Certificate, issuerKey *ecdsa.PrivateKey) {
+	certPath, keyPath := file+".crt", file+".key"
+	f.issueTo(certPath, keyPath, 0o600, names, notAfter, issuer, issuerKey,
+		true, true)
+	body, err := json.Marshal(ferronEntry{Chain: string(f.files[certPath]),
+		Key: string(f.files[keyPath])})
+	if err != nil {
+		panic("pki: the demo Ferron entry does not encode: " + err.Error())
+	}
+	for _, name := range []string{certPath, keyPath} {
+		delete(f.files, name)
+		delete(f.modes, name)
+	}
+	f.write(demoFile{path: file, mode: 0o600, body: body})
 }
 
 // demoNginxConf is the sample machine's one server block. It is read by the
@@ -295,7 +333,7 @@ func (f *Fake) rebuild() {
 	model := certs.Model{Backend: "pki", Now: now, Hostname: demoHostname}
 	fsys := f.fs()
 	trust := f.trustSet()
-	found, references, locations := Scan(fsys, scanLocations(""), nil)
+	found, references, locations := Scan(fsys, MachineLocations(fsys, "", ""), nil)
 	model.Locations = locations
 	for _, file := range found {
 		model.Entries = append(model.Entries,
